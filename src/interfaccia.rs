@@ -90,7 +90,8 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
             if c.gioco != prima {
                 // Stessi centimetri per giro nel gioco nuovo; FOV al valore di base del gioco.
                 // Dentro i limiti: un valore estremo convertito si ferma al limite invece di tornare al predefinito.
-                c.sensibilita = ((converti(prima, c.sensibilita, c.gioco) * 10_000.0).round() / 10_000.0)
+                c.sensibilita = ((converti(prima, c.sensibilita, c.gioco) * 1_000_000.0).round()
+                    / 1_000_000.0)
                     .clamp(LIMITI_SENSIBILITA.0, LIMITI_SENSIBILITA.1);
                 c.fov = c.gioco.fov_predefinito();
                 azione = Azione::Impostazioni;
@@ -198,7 +199,12 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
         ui.label(
             RichText::new(format!(
                 "Esc mette in pausa, F3 apre il pannello della latenza. {} · {}",
-                info.scheda, info.presentazione
+                info.scheda,
+                match info.presentazione {
+                    "Immediate" | "Mailbox" => "vsync spento",
+                    "Fifo" => "vsync acceso",
+                    altro => altro,
+                }
             ))
             .color(TENUE)
             .size(12.0),
