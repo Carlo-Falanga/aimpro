@@ -1,0 +1,101 @@
+# CI di aimpro: su ogni PR e su main, formattazione, clippy, test e build release su Windows.
+# Dopo il merge su main pubblica una release GitHub con aimpro.exe e il suo SHA-256.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  controlli:
+    name: fmt, clippy, test, build release
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v4
+
+      # La toolchain la fissa rust-toolchain.toml (1.100.0 con rustfmt e clippy): si installa quella del file,
+      # esplicitamente, così non dipende dalla versione di rustup del runner.
+      - name: Toolchain
+        shell: pwsh
+        run: |
+          $canale = (Select-String -Path rust-toolchain.toml -Pattern 'channel\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          rustup toolchain install $canale --profile minimal --component rustfmt,clippy
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formattazione
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build release
+        run: cargo build --release --locked
+
+      - name: SHA-256
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash target/release/aimpro.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  aimpro.exe" | Out-File -Encoding ascii target/release/aimpro.exe.sha256
+          Get-Content target/release/aimpro.exe.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aimpro-windows
+          path: |
+            target/release/aimpro.exe
+            target/release/aimpro.exe.sha256
+          if-no-files-found: error
+
+  release:
+    name: Release su GitHub
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: controlli
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: aimpro-windows
+          path: uscita
+
+      - name: Pubblica
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          versione=$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2)
+          tag="v${versione}-build.${{ github.run_number }}"
+          breve=$(git rev-parse --short HEAD)
+          {
+            echo "aimpro ${versione}, build ${{ github.run_number }} dal commit ${breve} di main."
+            echo
+            echo "Scarica aimpro.exe e avvialo: parte a schermo intero. Windows può mostrare l'avviso SmartScreen"
+            echo "perché l'eseguibile non è firmato: Ulteriori informazioni, poi Esegui comunque."
+            echo
+            echo "SHA-256: $(cut -d ' ' -f1 uscita/aimpro.exe.sha256)"
+          } > note.md
+          # Se la stessa run viene rilanciata la release c'è già: si sostituiscono solo i file.
+          if gh release view "$tag" > /dev/null 2>&1; then
+            gh release upload "$tag" uscita/aimpro.exe uscita/aimpro.exe.sha256 --clobber
+          else
+            gh release create "$tag" uscita/aimpro.exe uscita/aimpro.exe.sha256 \
+              --target "${{ github.sha }}" --title "aimpro ${versione} (build ${{ github.run_number }})" \
+              --notes-file note.md --latest
+          fi

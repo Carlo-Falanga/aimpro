@@ -1,0 +1,46 @@
+[package]
+name = "aimpro"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+description = "Aim trainer nativo per Windows a bassa latenza"
+publish = false
+
+[dependencies]
+bytemuck = { version = "1.25.2", features = ["derive"] }
+# Solo quello che serve su Windows: wgpu con il solo DX12, winit senza X11 e Wayland, egui senza appunti e link.
+egui = { version = "0.37.0", features = ["default_fonts"] }
+egui-wgpu = { version = "0.37.0", default-features = false }
+egui-winit = { version = "0.37.0", default-features = false }
+glam = { version = "0.34.3", features = ["bytemuck"] }
+log = "0.4"
+pollster = "1.0.3"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.2"
+wgpu = { version = "30.0.2", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
+windows = { version = "0.62.2", features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Gdi",
+  "Win32_Security",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Performance",
+  "Win32_System_Threading",
+  "Win32_System_WindowsProgramming",
+  "Win32_UI_Input",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"

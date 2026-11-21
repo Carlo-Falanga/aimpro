@@ -1,0 +1,509 @@
+//! Il disegno con wgpu su DirectX 12.
+//!
+//! - Solo DX12 (`Backends::DX12`), scheda video ad alte prestazioni.
+//! - Swapchain DXGI flip model; `desired_maximum_frame_latency = 1`: al massimo un frame in coda.
+//!   wgpu aspetta il "frame latency waitable object" dentro `get_current_texture`, quindi il ciclo dei frame legge
+//!   il mouse subito dopo, all'ultimo momento.
+//! - Presentazione `Immediate` (vsync spento, tearing permesso) quando c'è, altrimenti `Fifo`; `Fifo` con il vsync.
+//! - Niente buffer di profondità né multisample: una stanza vista da dentro, una sfera e dei rettangoli.
+//! - A ogni frame si scrive solo il buffer delle uniformi (144 byte); i rettangoli si riscrivono quando cambia il
+//!   secondo mostrato o la risoluzione.
+
+use std::sync::Arc;
+
+use bytemuck::{Pod, Zeroable};
+use glam::{DVec3, Mat4};
+use wgpu::util::DeviceExt;
+use winit::window::Window;
+
+const MAX_RETT: usize = 64;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Uniformi {
+    vp: [[f32; 4]; 4],
+    occhio: [f32; 4],
+    sfera: [f32; 4],
+    destra: [f32; 4],
+    su: [f32; 4],
+    schermo: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct Rett {
+    xywh: [f32; 4],
+    colore: [f32; 4],
+    tipo: f32,
+}
+
+/// Quello che serve per disegnare un frame di gioco.
+pub struct Scena {
+    pub vp: Mat4,
+    pub occhio: DVec3,
+    pub destra: DVec3,
+    pub su: DVec3,
+    /// Centro e raggio della sfera.
+    pub sfera: Option<(DVec3, f64)>,
+    /// Secondi rimasti e frazione (per il tempo in alto); `None` fuori dal giro.
+    pub tempo: Option<(u32, f32)>,
+}
+
+/// Il disegno di egui da aggiungere sopra la scena.
+pub struct StratoEgui<'a> {
+    pub primitive: &'a [egui::ClippedPrimitive],
+    pub schermo: &'a egui_wgpu::ScreenDescriptor,
+    /// Se le primitive sono nuove vanno caricate (`update_buffers`); se no si ridisegnano quelle di prima.
+    pub nuove: bool,
+}
+
+/// Le misure della stanza: l'occhio sta al centro, ad altezza 1.7.
+pub const STANZA: (f32, f32, f32) = (18.0, 10.0, 18.0);
+
+// Segmenti accesi per cifra: a b c d e f g
+const SEGMENTI: [u8; 10] = [
+    0b1111110, 0b0110000, 0b1101101, 0b1111001, 0b0110011, 0b1011011, 0b1011111, 0b1110000, 0b1111111,
+    0b1111011,
+];
+
+pub struct Grafica {
+    pub surface: wgpu::Surface<'static>,
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    pub config: wgpu::SurfaceConfiguration,
+    pub scheda: wgpu::AdapterInfo,
+    pub egui: egui_wgpu::Renderer,
+    modi: Vec<wgpu::PresentMode>,
+    p_stanza: wgpu::RenderPipeline,
+    p_sfera: wgpu::RenderPipeline,
+    p_rett: wgpu::RenderPipeline,
+    b_stanza: wgpu::Buffer,
+    vertici_stanza: u32,
+    b_uniformi: wgpu::Buffer,
+    b_rett: wgpu::Buffer,
+    gruppo: wgpu::BindGroup,
+    rett: [Rett; MAX_RETT],
+    n_rett: usize,
+    /// Secondi e dimensioni dell'ultima scrittura dei rettangoli; se cambiano si riscrivono.
+    rett_scritti: (u32, u32, u32, bool),
+    scala: f32,
+}
+
+/// Una faccia della stanza: i quattro angoli e la normale verso l'interno.
+type Faccia = ([f32; 3], [f32; 3], [f32; 3], [f32; 3], [f32; 3]);
+
+fn stanza() -> Vec<f32> {
+    let (x, y, z) = STANZA;
+    // Sei facce viste da dentro: posizione e normale verso l'interno.
+    let facce: [Faccia; 6] = [
+        ([-x, 0.0, -z], [x, 0.0, -z], [x, 0.0, z], [-x, 0.0, z], [0.0, 1.0, 0.0]),
+        ([-x, y, -z], [-x, y, z], [x, y, z], [x, y, -z], [0.0, -1.0, 0.0]),
+        ([-x, 0.0, -z], [-x, y, -z], [x, y, -z], [x, 0.0, -z], [0.0, 0.0, 1.0]),
+        ([-x, 0.0, z], [x, 0.0, z], [x, y, z], [-x, y, z], [0.0, 0.0, -1.0]),
+        ([-x, 0.0, -z], [-x, 0.0, z], [-x, y, z], [-x, y, -z], [1.0, 0.0, 0.0]),
+        ([x, 0.0, -z], [x, y, -z], [x, y, z], [x, 0.0, z], [-1.0, 0.0, 0.0]),
+    ];
+    let mut out = Vec::with_capacity(36 * 6);
+    for (a, b, c, d, n) in facce {
+        for v in [a, b, c, a, c, d] {
+            out.extend_from_slice(&v);
+            out.extend_from_slice(&n);
+        }
+    }
+    out
+}
+
+/// La modalità di presentazione per il vsync richiesto, fra quelle che la superficie offre.
+pub fn scegli_presentazione(modi: &[wgpu::PresentMode], vsync: bool) -> wgpu::PresentMode {
+    if vsync {
+        return wgpu::PresentMode::Fifo;
+    }
+    [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox]
+        .into_iter()
+        .find(|m| modi.contains(m))
+        .unwrap_or(wgpu::PresentMode::Fifo)
+}
+
+impl Grafica {
+    pub fn new(finestra: Arc<Window>, vsync: bool) -> Result<Self, String> {
+        let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
+        desc.backends = wgpu::Backends::DX12;
+        let istanza = wgpu::Instance::new(desc);
+        let dimensioni = finestra.inner_size();
+        let surface = istanza.create_surface(finestra).map_err(|e| format!("superficie: {e}"))?;
+        let scheda = pollster::block_on(istanza.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        }))
+        .map_err(|e| format!("nessuna scheda video DirectX 12: {e}"))?;
+        let (device, queue) = pollster::block_on(scheda.request_device(&wgpu::DeviceDescriptor {
+            label: Some("aimpro"),
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(scheda.limits()),
+            ..Default::default()
+        }))
+        .map_err(|e| format!("dispositivo: {e}"))?;
+
+        let capacita = surface.get_capabilities(&scheda);
+        // Formato non sRGB: i colori degli shader e di egui sono già in gamma.
+        let formato = capacita
+            .formats
+            .iter()
+            .copied()
+            .find(|f| matches!(f, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm))
+            .unwrap_or(capacita.formats[0]);
+        let modi = capacita.present_modes.clone();
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: formato,
+            color_space: Default::default(),
+            width: dimensioni.width.max(1),
+            height: dimensioni.height.max(1),
+            present_mode: scegli_presentazione(&modi, vsync),
+            desired_maximum_frame_latency: 1,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+        };
+        surface.configure(&device, &config);
+
+        let modulo = device.create_shader_module(wgpu::include_wgsl!("scena.wgsl"));
+        let layout_gruppo = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("uniformi"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("scena"),
+            bind_group_layouts: &[Some(&layout_gruppo)],
+            immediate_size: 0,
+        });
+        let b_uniformi = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("uniformi"),
+            size: std::mem::size_of::<Uniformi>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let gruppo = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("uniformi"),
+            layout: &layout_gruppo,
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: b_uniformi.as_entire_binding() }],
+        });
+
+        let pipeline = |nome: &str,
+                        vs: &str,
+                        fs: &str,
+                        buffers: &[Option<wgpu::VertexBufferLayout>],
+                        blend: Option<wgpu::BlendState>| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(nome),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &modulo,
+                    entry_point: Some(vs),
+                    compilation_options: Default::default(),
+                    buffers,
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &modulo,
+                    entry_point: Some(fs),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: formato,
+                        blend,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let p_stanza = pipeline(
+            "stanza",
+            "vs_stanza",
+            "fs_stanza",
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: 24,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
+            })],
+            None,
+        );
+        let premoltiplicato = Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING);
+        let p_sfera = pipeline("sfera", "vs_sfera", "fs_sfera", &[], premoltiplicato);
+        let p_rett = pipeline(
+            "rettangoli",
+            "vs_rett",
+            "fs_rett",
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<Rett>() as u64,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32],
+            })],
+            premoltiplicato,
+        );
+
+        let dati_stanza = stanza();
+        let b_stanza = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("stanza"),
+            contents: bytemuck::cast_slice(&dati_stanza),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let b_rett = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rettangoli"),
+            size: (std::mem::size_of::<Rett>() * MAX_RETT) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let egui = egui_wgpu::Renderer::new(
+            &device,
+            formato,
+            egui_wgpu::RendererOptions { dithering: false, ..Default::default() },
+        );
+
+        Ok(Grafica {
+            surface,
+            device,
+            queue,
+            config,
+            scheda: scheda.get_info(),
+            egui,
+            modi,
+            p_stanza,
+            p_sfera,
+            p_rett,
+            b_stanza,
+            vertici_stanza: (dati_stanza.len() / 6) as u32,
+            b_uniformi,
+            b_rett,
+            gruppo,
+            rett: [Rett::default(); MAX_RETT],
+            n_rett: 0,
+            rett_scritti: (u32::MAX, 0, 0, false),
+            scala: finestra_scala(),
+        })
+    }
+
+    pub fn ridimensiona(&mut self, larghezza: u32, altezza: u32, scala: f32) {
+        if larghezza == 0 || altezza == 0 {
+            return;
+        }
+        self.config.width = larghezza;
+        self.config.height = altezza;
+        self.scala = scala.max(1.0);
+        self.surface.configure(&self.device, &self.config);
+        self.rett_scritti = (u32::MAX, 0, 0, false);
+    }
+
+    pub fn imposta_vsync(&mut self, vsync: bool) {
+        let modo = scegli_presentazione(&self.modi, vsync);
+        if modo != self.config.present_mode {
+            self.config.present_mode = modo;
+            self.surface.configure(&self.device, &self.config);
+        }
+    }
+
+    pub fn presentazione(&self) -> wgpu::PresentMode {
+        self.config.present_mode
+    }
+
+    pub fn proporzione(&self) -> f64 {
+        f64::from(self.config.width) / f64::from(self.config.height)
+    }
+
+    /// Il prossimo frame della swapchain (qui aspetta il "frame latency waitable object").
+    pub fn acquisisci(&mut self) -> Option<wgpu::SurfaceTexture> {
+        match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(t) => Some(t),
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => Some(t),
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.config);
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Disegna scena ed egui nel frame e lo presenta.
+    pub fn disegna(
+        &mut self,
+        frame: wgpu::SurfaceTexture,
+        scena: Option<&Scena>,
+        strato: Option<StratoEgui>,
+    ) {
+        let vista = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder =
+            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+
+        if let Some(s) = scena {
+            let (secondi, frazione) = s.tempo.unwrap_or((0, 0.0));
+            let (cx, cy, r) = s.sfera.map_or((0.0, 0.0, 0.0), |(c, r)| (c.x, c.y, r));
+            let cz = s.sfera.map_or(0.0, |(c, _)| c.z);
+            let u = Uniformi {
+                vp: s.vp.to_cols_array_2d(),
+                occhio: [s.occhio.x as f32, s.occhio.y as f32, s.occhio.z as f32, 0.0],
+                sfera: [cx as f32, cy as f32, cz as f32, r as f32],
+                destra: [s.destra.x as f32, s.destra.y as f32, s.destra.z as f32, 0.0],
+                su: [s.su.x as f32, s.su.y as f32, s.su.z as f32, 0.0],
+                schermo: [self.config.width as f32, self.config.height as f32, frazione, self.scala],
+            };
+            self.queue.write_buffer(&self.b_uniformi, 0, bytemuck::bytes_of(&u));
+            let chiave = (secondi, self.config.width, self.config.height, s.tempo.is_some());
+            if chiave != self.rett_scritti {
+                self.prepara_rettangoli(s.tempo.map(|t| t.0));
+                self.queue.write_buffer(&self.b_rett, 0, bytemuck::cast_slice(&self.rett[..self.n_rett]));
+                self.rett_scritti = chiave;
+            }
+        }
+
+        let mut comandi_egui = Vec::new();
+        if let Some(st) = &strato
+            && st.nuove
+        {
+            comandi_egui =
+                self.egui.update_buffers(&self.device, &self.queue, &mut encoder, st.primitive, st.schermo);
+        }
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scena"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &vista,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.07, g: 0.07, b: 0.08, a: 1.0 }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if let Some(s) = scena {
+                pass.set_bind_group(0, &self.gruppo, &[]);
+                pass.set_pipeline(&self.p_stanza);
+                pass.set_vertex_buffer(0, self.b_stanza.slice(..));
+                pass.draw(0..self.vertici_stanza, 0..1);
+                if s.sfera.is_some() {
+                    pass.set_pipeline(&self.p_sfera);
+                    pass.draw(0..6, 0..1);
+                }
+                if self.n_rett > 0 {
+                    pass.set_pipeline(&self.p_rett);
+                    pass.set_vertex_buffer(0, self.b_rett.slice(..));
+                    pass.draw(0..6, 0..self.n_rett as u32);
+                }
+            }
+            if let Some(st) = &strato {
+                let mut pass = pass.forget_lifetime();
+                self.egui.render(&mut pass, st.primitive, st.schermo);
+            }
+        }
+
+        if comandi_egui.is_empty() {
+            self.queue.submit([encoder.finish()]);
+        } else {
+            comandi_egui.push(encoder.finish());
+            self.queue.submit(comandi_egui);
+        }
+        self.queue.present(frame);
+    }
+
+    fn aggiungi(&mut self, x: f32, y: f32, w: f32, h: f32, colore: [f32; 4], tipo: f32) {
+        if self.n_rett < MAX_RETT {
+            self.rett[self.n_rett] = Rett { xywh: [x, y, w, h], colore, tipo };
+            self.n_rett += 1;
+        }
+    }
+
+    fn prepara_rettangoli(&mut self, secondi: Option<u32>) {
+        self.n_rett = 0;
+        let s = self.scala;
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        // Mirino: una croce con contorno scuro, si vede su ogni sfondo.
+        let cx = (w / 2.0).round();
+        let cy = (h / 2.0).round();
+        let spessore = (2.0 * s).round().max(2.0);
+        let lunghezza = (6.0 * s).round();
+        let vuoto = (4.0 * s).round();
+        let bordo = s.round().max(1.0);
+        let meta = (spessore / 2.0).floor();
+        for passo in 0..2 {
+            let o = if passo == 0 { bordo } else { 0.0 };
+            let c = if passo == 0 { [0.0, 0.0, 0.0, 0.75] } else { [1.0, 1.0, 1.0, 1.0] };
+            self.aggiungi(cx + vuoto - o, cy - meta - o, lunghezza + 2.0 * o, spessore + 2.0 * o, c, 0.0);
+            self.aggiungi(
+                cx - vuoto - lunghezza - o,
+                cy - meta - o,
+                lunghezza + 2.0 * o,
+                spessore + 2.0 * o,
+                c,
+                0.0,
+            );
+            self.aggiungi(cx - meta - o, cy + vuoto - o, spessore + 2.0 * o, lunghezza + 2.0 * o, c, 0.0);
+            self.aggiungi(
+                cx - meta - o,
+                cy - vuoto - lunghezza - o,
+                spessore + 2.0 * o,
+                lunghezza + 2.0 * o,
+                c,
+                0.0,
+            );
+        }
+        if let Some(sec) = secondi {
+            // Il tempo in alto, a sette segmenti, e la barra che si accorcia.
+            let ch = (30.0 * s).round();
+            let cw = (17.0 * s).round();
+            let t = (4.0 * s).round().max(2.0);
+            let spazio = (7.0 * s).round();
+            let y = (22.0 * s).round();
+            let n = sec.min(99);
+            self.cifra(n / 10, (cx - cw - spazio / 2.0).round(), y, cw, ch, t);
+            self.cifra(n % 10, (cx + spazio / 2.0).round(), y, cw, ch, t);
+            let lb = (220.0 * s).round();
+            let hb = (3.0 * s).round().max(2.0);
+            let yb = y + ch + (10.0 * s).round();
+            let xb = (cx - lb / 2.0).round();
+            self.aggiungi(xb, yb, lb, hb, [1.0, 1.0, 1.0, 0.18], 0.0);
+            self.aggiungi(xb, yb, lb, hb, [1.0, 0.69, 0.13, 0.95], 1.0);
+        }
+    }
+
+    fn cifra(&mut self, n: u32, x: f32, y: f32, w: f32, h: f32, t: f32) {
+        let m = SEGMENTI[n as usize % 10];
+        let meta = h / 2.0;
+        let lato = meta - 1.5 * t;
+        let c = [0.92, 0.92, 0.92, 0.9];
+        let segmenti = [
+            (0b1000000, x + t, y, w - 2.0 * t, t),
+            (0b0100000, x + w - t, y + t, t, lato),
+            (0b0010000, x + w - t, y + meta + 0.5 * t, t, lato),
+            (0b0001000, x + t, y + h - t, w - 2.0 * t, t),
+            (0b0000100, x, y + meta + 0.5 * t, t, lato),
+            (0b0000010, x, y + t, t, lato),
+            (0b0000001, x + t, y + meta - 0.5 * t, w - 2.0 * t, t),
+        ];
+        for (bit, sx, sy, sw, sh) in segmenti {
+            if m & bit != 0 {
+                self.aggiungi(sx, sy, sw, sh, c, 0.0);
+            }
+        }
+    }
+}
+
+fn finestra_scala() -> f32 {
+    1.0
+}
