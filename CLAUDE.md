@@ -1,11 +1,11 @@
-# aim-pro
+# aimpro
 
-Aim trainer web a bassa latenza, di Carlo. Il contesto del progetto sta in `D:\dev\contesti\aim-pro\CONTESTO.md`
-(chiave `aim-pro` in `~/.claude/carlo/progetti.json`).
+Aim trainer web a bassa latenza, di Carlo. Il contesto del progetto sta in `D:\dev\contesti\aimpro\CONTESTO.md`
+(chiave `aimpro` in `~/.claude/carlo/progetti.json`).
 
 ## Stack
 
-Da scegliere nella prima task (`aim-pro-20261121-stack-primo-scenario`), che riscrive questa sezione con lo stack
+Da scegliere nella prima task (`aimpro-20261121-stack-primo-scenario`), che riscrive questa sezione con lo stack
 scelto, le versioni e il perché, misure di latenza comprese.
 
 ## Come si prova
