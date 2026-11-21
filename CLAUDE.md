@@ -48,7 +48,7 @@ Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
 ```
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # 44 test: sensibilità, impostazioni, visuale, giro, misure, tempo
+cargo test                      # 45 test: sensibilità, impostazioni, visuale, giro, misure, tempo
 cargo run --release             # il gioco, a schermo intero (Esc pausa, F3 pannello della latenza)
 cargo run --release -- --finestra            # in una finestra normale
 cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce, scrive misure\bench-<ora>.md
@@ -127,16 +127,17 @@ arriva davvero sullo schermo e quanto lavora la scheda video. Va lanciato come a
 `strumenti\presentmon.ps1` scarica la 2.6.0 dalla release ufficiale, ne controlla la firma (deve essere di Intel),
 lo fa girare insieme al banco e salva anche i suoi messaggi in `misure\`; poi
 `python strumenti\presentmon_fasi.py misure\presentmon.csv misure\bench-presentmon.fasi.csv` fa il riassunto per
-fase. Nel giro di misura tutte le fasi del banco sono risultate valide.
+fase (ogni riga va nella fase in cui è avvenuto il present, `TimeInQPC`). Nel giro di misura tutte le fasi del
+banco sono risultate valide.
 
 Tempi in ms, mediana / 99° percentile. "present→schermo" è `MsUntilDisplayed`, dalla chiamata a `present` al
 momento in cui l'immagine entra nello schermo; GPU = somma di `MsGPUBusy` sulla durata della fase.
 
 | fase | present al secondo | modalità | present→schermo | GPU |
 |---|---|---|---|---|
-| vsync spento, senza limite | 1911 | Hardware: Independent Flip | 0,18 / 1,16 | 47% |
+| vsync spento, senza limite | 1911 | Hardware: Independent Flip | 0,18 / 1,15 | 47% |
 | vsync acceso (Fifo) | 239 | Hardware Composed: Independent Flip | 4,00 / 4,05 | 25% |
-| vsync spento, limite 240 fps | 240 | Hardware: Independent Flip | 0,74 / 3,08 | 24% |
+| vsync spento, limite 240 fps | 240 | Hardware: Independent Flip | 0,74 / 3,09 | 24% |
 | vsync spento, limite 480 fps | 475 | Hardware: Independent Flip | 0,25 / 2,04 | 21% |
 | vsync spento, pannello F3 aperto | 1901 | Hardware: Independent Flip | 0,16 / 4,68 | 45% |
 | menu, mouse in movimento | 221 | Hardware: Independent Flip | 0,25 / 3,44 | 12% |
@@ -145,7 +146,8 @@ A vsync spento la presentazione è "Independent Flip" in hardware: l'immagine va
 compositore di Windows, e arriva in 0,18 ms di mediana. Col vsync aspetta il refresh, circa 4 ms in più a 240 Hz.
 A vsync spento, nello stesso giro, il programma ha contato 2676 frame al secondo e PresentMon 1911 present al
 secondo: a queste frequenze PresentMon non registra tutti gli eventi (dedotto dal confronto), quindi i suoi
-percentili a vsync spento si basano su una parte dei frame. Con il vsync e con i limiti i due conti coincidono.
+percentili a vsync spento si basano su una parte dei frame. Col vsync e col limite a 240 fps i due conti
+coincidono; col limite a 480 fps sono 475 contro 480.
 
 Il ritardo dal mouse all'immagine, sommando le mediane (dedotto, non misurato in un pezzo solo): count→present del
 banco più present→schermo di PresentMon, cioè circa 0,6 ms a vsync spento (0,43 + 0,18) e circa 7,9 ms col vsync
