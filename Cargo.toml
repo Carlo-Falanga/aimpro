@@ -1,0 +1,22 @@
+[package]
+name = "aimpro"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.100"
+description = "Aim trainer nativo per Windows a bassa latenza"
+publish = false
+
+[dependencies]
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = "line-tables-only"
