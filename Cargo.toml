@@ -7,6 +7,8 @@ description = "Aim trainer nativo per Windows a bassa latenza"
 publish = false
 
 [dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.2.2"
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
