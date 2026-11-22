@@ -2,15 +2,23 @@
 // del tempo. Niente texture né buffer di profondità: la stanza è un parallelepipedo visto da dentro, ogni pixel ne
 // vede una faccia sola, e la sfera si disegna sopra.
 
-struct Uniformi {
+// Quello che cambia a ogni frame arriva come costanti immediate (root constants di DirectX 12, 128 byte): stanno
+// nella lista dei comandi, senza buffer da copiare.
+struct Immediati {
     vp: mat4x4<f32>,
-    occhio: vec4<f32>,
     // xyz centro della sfera, w raggio (0 = nessuna sfera)
     sfera: vec4<f32>,
     destra: vec4<f32>,
     su: vec4<f32>,
     // larghezza, altezza in pixel, frazione di tempo rimasta, scala dell'interfaccia
     schermo: vec4<f32>,
+};
+
+var<immediate> f: Immediati;
+
+// Quello che non cambia nel giro (la posizione dell'occhio) sta in un buffer, riscritto solo quando cambia.
+struct Uniformi {
+    occhio: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniformi;
@@ -26,7 +34,7 @@ struct UscitaStanza {
 @vertex
 fn vs_stanza(@location(0) pos: vec3<f32>, @location(1) normale: vec3<f32>) -> UscitaStanza {
     var o: UscitaStanza;
-    o.pos = u.vp * vec4<f32>(pos, 1.0);
+    o.pos = f.vp * vec4<f32>(pos, 1.0);
     o.mondo = pos;
     o.normale = normale;
     return o;
@@ -75,18 +83,18 @@ fn vs_sfera(@builtin(vertex_index) v: u32) -> UscitaSfera {
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
     );
     let a = angoli[v];
-    let p = u.sfera.xyz + (u.destra.xyz * a.x + u.su.xyz * a.y) * u.sfera.w * 1.6;
+    let p = f.sfera.xyz + (f.destra.xyz * a.x + f.su.xyz * a.y) * f.sfera.w * 1.6;
     var o: UscitaSfera;
-    o.pos = u.vp * vec4<f32>(p, 1.0);
+    o.pos = f.vp * vec4<f32>(p, 1.0);
     o.mondo = p;
     return o;
 }
 
 @fragment
 fn fs_sfera(i: UscitaSfera) -> @location(0) vec4<f32> {
-    let r = u.sfera.w;
+    let r = f.sfera.w;
     let rd = normalize(i.mondo - u.occhio.xyz);
-    let oc = u.sfera.xyz - u.occhio.xyz;
+    let oc = f.sfera.xyz - u.occhio.xyz;
     let b = dot(oc, rd);
     let d2 = dot(oc, oc) - b * b;
     let dist = sqrt(max(d2, 0.0)) - r;
@@ -97,7 +105,7 @@ fn fs_sfera(i: UscitaSfera) -> @location(0) vec4<f32> {
     }
     let h = sqrt(max(r * r - d2, 0.0));
     let punto = u.occhio.xyz + rd * (b - h);
-    let n = normalize(punto - u.sfera.xyz);
+    let n = normalize(punto - f.sfera.xyz);
     let luce = normalize(vec3<f32>(0.35, 0.8, 0.45));
     let diffusa = max(dot(n, luce), 0.0);
     let bordo = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
@@ -126,10 +134,10 @@ fn vs_rett(
     var larghezza = rett.z;
     if (tipo > 0.5) {
         // La barra del tempo: la larghezza segue la frazione rimasta, senza riscrivere il buffer.
-        larghezza = rett.z * u.schermo.z;
+        larghezza = rett.z * f.schermo.z;
     }
     let p = rett.xy + angoli[v] * vec2<f32>(larghezza, rett.w);
-    let c = p / u.schermo.xy * 2.0 - 1.0;
+    let c = p / f.schermo.xy * 2.0 - 1.0;
     var o: UscitaRett;
     o.pos = vec4<f32>(c.x, -c.y, 0.0, 1.0);
     o.colore = vec4<f32>(colore.rgb * colore.a, colore.a);
