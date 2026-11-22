@@ -31,6 +31,14 @@ L'ultima versione è nelle [release](https://github.com/Carlo-Falanga/aimpro/rel
 SHA-256. L'eseguibile non è firmato, quindi Windows mostra l'avviso SmartScreen: "Ulteriori informazioni", poi
 "Esegui comunque".
 
+## Aggiornare
+
+All'avvio aimpro chiede a GitHub se c'è una versione più nuova; se c'è, il menu lo dice e "Aggiorna e riavvia"
+scarica il nuovo `aimpro.exe`, ne controlla lo SHA-256, lo mette al posto di quello in uso e lo riapre. Impostazioni
+e storico restano. Il controllo si spegne dalle impostazioni ("Aggiornamenti: controlla all'avvio"); la richiesta
+a GitHub non manda niente di tuo, solo il nome e la versione di aimpro. Le versioni uscite prima non sanno
+aggiornarsi: la prima volta si scarica a mano.
+
 ## Compilare
 
 Serve Rust (la versione la fissa `rust-toolchain.toml`):

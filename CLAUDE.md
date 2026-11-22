@@ -14,6 +14,8 @@ Aim trainer nativo per Windows, a bassa latenza, di Carlo. Il contesto del proge
 | egui, egui-wgpu, egui-winit | 0.37.0 | solo menu, pausa, riepilogo, statistiche e pannello F3: nel frame del giro egui non gira (col pannello aperto, 4 volte al secondo) |
 | glam, bytemuck | 0.34.3, 1.25.2 | vettori e buffer per la GPU |
 | serde, toml | 1.0.229, 1.2.2 | le impostazioni in `%APPDATA%\aimpro\config.toml` e lo storico dei giri |
+| serde_json | 1.0.154 | solo per leggere la risposta delle API di GitHub nel controllo degli aggiornamenti |
+| WinHTTP e CNG di Windows | crate `windows` 0.62.2 | la rete (una GET, nel thread dell'aggiornamento) e lo SHA-256 (`BCryptHash`): niente librerie di rete né di crittografia in più |
 
 Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
 
@@ -52,6 +54,49 @@ Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
 - `storico.rs`, `esporta.rs`: lo storico dei giri (formato qui sotto), il record per scenario, la sessione e
   l'esportazione CSV. La schermata Statistiche sta in `interfaccia.rs`, col grafico disegnato dal painter di egui.
 - `latenza.rs`, `misure.rs`, `banco.rs`, `allocazioni.rs`: le misure, il pannello F3 e il banco `--bench`.
+- `aggiornamento.rs`, `rete.rs`: l'aggiornamento dall'app (qui sotto).
+
+## L'aggiornamento dall'app
+
+- **Il numero di build** lo scrive la CI dentro l'.exe: `AIMPRO_BUILD` = `github.run_number`, letto con
+  `option_env!`, lo stesso numero del tag `v<versione>-build.<numero>` della release. Il menu lo mostra in fondo
+  ("build 13"); una build locale non ha numero ("build locale") e non controlla niente.
+- **Il controllo**: all'avvio, se "Aggiornamenti: controlla all'avvio" è acceso (lo è di base; un `config.toml`
+  di prima senza il campo `controlla_aggiornamenti` lo prende acceso) e non è il banco, un thread fa una GET con
+  WinHTTP a `https://api.github.com/repos/Carlo-Falanga/aimpro/releases/latest`, senza token e con il solo
+  `User-Agent: aimpro/<versione>` (proxy di sistema, timeout 10 s, letture 30 s). Se la build del tag è più nuova e
+  la release ha `aimpro.exe` e `aimpro.exe.sha256`, il menu mostra "Aggiornamento disponibile" con le due build e
+  "Aggiorna e riavvia". Senza rete, con un errore delle API o all'ultima versione non compare niente. L'avvio non
+  aspetta il thread: lo sveglia un evento del ciclo (`EventLoopProxy`) quando ha qualcosa da mostrare.
+- **"Aggiorna e riavvia"**: un thread scarica `aimpro.exe.sha256` e `aimpro.exe` (al più 64 MB; il menu mostra i MB
+  e la percentuale), controlla lo SHA-256 e l'intestazione `MZ`, scrive `<exe>.nuovo` accanto all'.exe in uso,
+  rinomina l'.exe in uso in `<exe>.vecchio` (un .exe in uso si può rinominare, non cancellare) e mette il nuovo al
+  suo posto; poi il thread principale salva le impostazioni, avvia il nuovo con gli stessi argomenti ed esce. Vale
+  per qualunque nome abbia l'.exe (anche `aimpro (1).exe`). All'avvio dopo, un thread cancella `<exe>.vecchio`
+  (riprova per 10 s: il processo di prima può essere ancora in chiusura). Ogni errore (rete, download interrotto,
+  SHA diverso, cartella non scrivibile) lascia l'.exe di prima e nel menu "Aggiornamento non riuscito", il motivo
+  e "Riprova". Durante il download "Inizia" è spento. Il nuovo .exe si scrive con `sync_all` prima delle rinomine, e
+  chi chiude aimpro mentre le rinomine sono a metà aspetta che finiscano (dopo, non ne partono altre). Se il nuovo non riparte da solo, il menu
+  dice "Build N installata" e di riaprire aimpro, senza "Riprova".
+- **Mai durante il giro**: entrando nel giro (`cursore_di_gioco`, anche alla ripresa dalla pausa) la richiesta in
+  corso si chiude subito con `WinHttpCloseHandle` (anche a metà di nome, connessione, TLS o attesa della risposta) e
+  nessuna ne parte finché si gioca; il controllo la rifà quando si esce dal giro (al più 5 volte). Nel frame non c'è
+  niente dell'aggiornamento. Il banco non va in rete. Provato col finto GitHub in modo `lento`: le richieste
+  iniziate prima di un giro si chiudono quando il giro parte, e la successiva riesce a giro finito.
+- **La prima volta**: le release pubblicate prima di questa funzione non hanno il numero dentro e non si
+  aggiornano da sole: la prima release con questa funzione va scaricata a mano una volta.
+
+Come si prova senza toccare le release vere: si compila con una build finta e con le API puntate al finto GitHub
+locale, e si avvia in una cartella di prova con `APPDATA` di prova:
+
+```
+AIMPRO_BUILD=5 AIMPRO_API_PROVA=http://127.0.0.1:8765/latest.json cargo build --release
+python strumenti/finto_github.py <un aimpro.exe da servire> sha-sbagliato   # o giusto, exe-404, interrotto
+```
+
+`AIMPRO_API_PROVA` esiste solo nelle build che lo ricevono al momento della compilazione: le release non ce l'hanno
+e accettano solo indirizzi `https`. Con il solo `AIMPRO_BUILD=5` la prova va contro le release vere (scarica
+l'ultima).
 
 ## Lo storico dei giri
 
@@ -105,7 +150,7 @@ con la virgola, data `GG/MM/AAAA hh:mm:ss`, UTF-8 con il BOM, righe chiuse da CR
 ```
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # 71 test: sensibilità, impostazioni, visuale, giro, registro, storico, CSV, misure, tempo
+cargo test                      # 87 test: sensibilità, impostazioni, visuale, giro, registro, storico, CSV, misure, tempo, aggiornamento
 cargo run --release             # il gioco, a schermo intero (Esc pausa, F3 pannello della latenza)
 cargo run --release -- --finestra            # in una finestra normale
 cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce, scrive misure\bench-<ora>.md
@@ -281,6 +326,8 @@ Il percorso è quello di casa (`~/.claude/skills/start/repo.md`): un worktree pe
 
 - **CI** (`.github/workflows/ci.yml`): su ogni PR e su `main`, su `windows-latest`: `cargo fmt --check`, clippy con
   `-D warnings`, `cargo test`, build release; l'.exe e il suo SHA-256 come artefatto.
+- **Build nell'.exe**: il job `controlli` compila con `AIMPRO_BUILD` = numero della run, lo stesso del tag della
+  release: è quello che l'app confronta per sapere se c'è un aggiornamento.
 - **Release**: dopo ogni merge su `main` il job `release` pubblica su GitHub una release `v<versione>-build.<numero>`
   con `aimpro.exe` e `aimpro.exe.sha256`. Si verifica dalla pagina delle release, scaricando l'.exe e avviandolo.
   L'eseguibile non è firmato: Windows mostra l'avviso SmartScreen ("Ulteriori informazioni", poi "Esegui comunque").
