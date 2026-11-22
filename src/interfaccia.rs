@@ -196,9 +196,13 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
         if pulsante(ui, "Esci da aimpro", false) {
             azione = Azione::Chiudi;
         }
+        // Due righe: in una sola, nel riquadro da 440 px, il nome della scheda finiva spezzato a metà.
+        ui.label(
+            RichText::new("Esc mette in pausa, F3 apre il pannello della latenza.").color(TENUE).size(12.0),
+        );
         ui.label(
             RichText::new(format!(
-                "Esc mette in pausa, F3 apre il pannello della latenza. {} · {}",
+                "{} · {}",
                 info.scheda,
                 match info.presentazione {
                     "Immediate" | "Mailbox" => "vsync spento",
