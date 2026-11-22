@@ -357,7 +357,7 @@ impl Banco {
         let mem = sistema::memoria();
         let _ = writeln!(
             self.testo,
-            "| {} | {} | {:.0} | {} | {} | {} | {} | {} | {:.1}% / {:.1}% | {:.1} / {:.1} | {} | {} |",
+            "| {} | {} | {:.0} | {} | {} | {} | {} | {} | {} | {:.1}% / {:.1}% | {:.1} / {:.1} | {} | {} |",
             nome,
             if nel_giro { presentazione.as_str() } else { "-" },
             fps,
@@ -366,6 +366,11 @@ impl Banco {
             if nel_giro { r4(&m.count_present_vecchio) } else { "-".into() },
             if nel_giro { r(&m.count_present_recente) } else { "-".into() },
             if nel_giro { r(&m.clic_present) } else { "-".into() },
+            if nel_giro && m.attesa.n > 0 {
+                format!("{:.3} / {:.3}", m.attesa.mediana, m.lavoro.mediana)
+            } else {
+                "-".into()
+            },
             cpu.tempo_ms / durata_ms * 100.0,
             cpu.cicli_ms / durata_ms * 100.0,
             sistema::Memoria::mb(mem.privata),
@@ -579,15 +584,16 @@ impl Banco {
              frequenza calibrata, più bassa del vero se il core rallenta). Allocazioni per frame: di tutto il \
              processo, poi quelle dentro wgpu e quelle del codice di aimpro fra get_current_texture e present. \
              Memoria a fine fase, in MB: set di lavoro privato (la colonna \"Memoria\" di Gestione attività) / \
-             memoria impegnata privata.\n"
+             memoria impegnata privata. Attesa della swapchain (get_current_texture) e lavoro del frame (dalla \
+             lettura del mouse al ritorno di present): mediane sugli ultimi 4096 frame della fase.\n"
         );
         let _ = writeln!(
             out,
             "| fase | presentazione | fps | frame time | jitter | count→present (vecchio) | count→present \
-             (recente) | clic→present | CPU (tempo / cicli) | memoria MB (privata / impegnata) | allocazioni \
+             (recente) | clic→present | attesa swapchain / lavoro del frame | CPU (tempo / cicli) | memoria MB (privata / impegnata) | allocazioni \
              per frame (processo / wgpu / aimpro) | eventi mouse |"
         );
-        let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|---|");
+        let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|---|---|");
         out.push_str(&self.testo);
         let _ = writeln!(out, "\nMemoria alle tappe dell'avvio, in MB (privata / impegnata):\n");
         for (tappa, m) in sistema::tappe_memoria() {
