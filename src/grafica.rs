@@ -17,6 +17,9 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 const MAX_RETT: usize = 64;
+/// Descrittori di texture e buffer che gli shader possono vedere insieme: ne usiamo meno di dieci (le uniformi e
+/// le texture di egui); 16 384 lasciano un margine largo e costano 0,5 MB.
+const DESCRITTORI: u32 = 16_384;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -142,7 +145,16 @@ impl Grafica {
         crate::sistema::segna_memoria("istanza DirectX 12 e scheda video");
         let (device, queue) = pollster::block_on(scheda.request_device(&wgpu::DeviceDescriptor {
             label: Some("aimpro"),
-            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(scheda.limits()),
+            required_limits: wgpu::Limits {
+                // L'heap dei descrittori che gli shader vedono: wgpu lo crea grande quanto questo limite (1 000 000
+                // di descrittori, circa 31 MB di memoria impegnata). Qui ci sono una manciata di bind group.
+                max_non_sampler_bindings: DESCRITTORI,
+                ..wgpu::Limits::downlevel_defaults().using_resolution(scheda.limits())
+            },
+            // Blocchi di memoria piccoli: con `Performance` i blocchi della memoria che la CPU vede partono da 64 MB
+            // (4 MB con `MemoryUsage`) e il primo nasce già col dispositivo: misurato il 22/11, 60 MB in meno nel set
+            // di lavoro. Qui le risorse si creano all'avvio, non nel giro: i blocchi grandi non servono.
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
         .map_err(|e| format!("dispositivo: {e}"))?;
