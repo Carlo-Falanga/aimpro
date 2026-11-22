@@ -241,13 +241,15 @@ pub fn centro_finestra(hwnd: isize) -> Option<(i32, i32)> {
     Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
 }
 
-/// C'è stato un errore fatale: `main` esce con codice 1 (lo legge `presentmon.ps1`).
+/// C'è stato un errore fatale (all'avvio o col ciclo degli eventi fermato da un errore): `main` esce con codice 1
+/// (lo stampa `presentmon.ps1`). Dopo un panic, nella release (`panic = "abort"`), il processo si interrompe con il
+/// codice di Windows e non arriva all'1; in debug un panic nel thread principale esce con 101.
 pub static ERRORE_FATALE: AtomicBool = AtomicBool::new(false);
 
-/// Un errore che ferma il programma (all'avvio o un panic): nella release non c'è la console, quindi va in
-/// `%APPDATA%\aimpro\errore.txt` e in una finestra di messaggio, sopra lo schermo intero e col cursore libero
-/// (nel giro è bloccato al centro e non si potrebbe premere OK). Col banco niente finestra (nessuno la
-/// chiuderebbe): basta il file.
+/// Un errore che ferma il programma (all'avvio, il ciclo degli eventi fermato o un panic): nella release non c'è
+/// la console, quindi va in `%APPDATA%\aimpro\errore.txt` e in una finestra di messaggio, sopra lo schermo intero
+/// e col cursore libero (nel giro è bloccato al centro e non si potrebbe premere OK). Col banco niente finestra
+/// (nessuno la chiuderebbe): basta il file.
 pub fn errore_fatale(testo: &str, banco: bool) {
     ERRORE_FATALE.store(true, Ordering::SeqCst);
     // Anche col banco: con panic = "abort" il Drop del banco, che lo libera, non gira.
