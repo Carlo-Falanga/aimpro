@@ -11,9 +11,9 @@ Aim trainer nativo per Windows, a bassa latenza, di Carlo. Il contesto del proge
 | winit | 0.30.13, senza X11 e Wayland | finestra, tastiera, schermo intero esclusivo alla frequenza più alta del monitor |
 | wgpu | 30.0.2, solo backend DX12 e WGSL | DX12 è l'API nativa di Windows: swapchain flip, `Immediate` con vsync spento, frame latency 1 |
 | Raw Input di Windows | crate `windows` 0.62.2 | count grezzi del mouse, senza accelerazione né cursore, con l'istante QPC di ogni evento |
-| egui, egui-wgpu, egui-winit | 0.37.0 | solo menu, pausa, riepilogo e pannello F3: nel frame del giro egui non gira (col pannello aperto, 4 volte al secondo) |
+| egui, egui-wgpu, egui-winit | 0.37.0 | solo menu, pausa, riepilogo, statistiche e pannello F3: nel frame del giro egui non gira (col pannello aperto, 4 volte al secondo) |
 | glam, bytemuck | 0.34.3, 1.25.2 | vettori e buffer per la GPU |
-| serde, toml | 1.0.229, 1.2.2 | le impostazioni in `%APPDATA%\aimpro\config.toml` |
+| serde, toml | 1.0.229, 1.2.2 | le impostazioni in `%APPDATA%\aimpro\config.toml` e lo storico dei giri |
 
 Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
 
@@ -41,14 +41,70 @@ Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
   come rettangoli istanziati, riscritti solo quando cambiano.
 - `giro.rs`, `camera.rs`, `sensibilita.rs`, `config.rs`: lo scenario, la visuale, la conversione delle sensibilità
   (CS2 0,022 gradi per count, Valorant 0,07; FOV di CS2 orizzontale su 4:3, di Valorant su 16:9) e le impostazioni.
+  Gli scenari durano 30 secondi (lo standard scelto da Carlo il 22/11/2026). Record e statistiche sono per id di
+  scenario: uno scenario con un'altra durata ha un altro id.
+- `registro.rs`: per ogni bersaglio colpito il tempo comparsa→colpo (pause tolte), la distanza angolare dal
+  precedente (per il primo, dalla visuale di partenza) e gli overshoot (il mirino entra nella sfera e ne esce senza
+  colpirla, controllato a ogni clic con la visuale del suo istante e a ogni frame dopo il movimento: un passaggio
+  che entra ed esce dentro lo stesso frame non si vede, e col limite a 240 fps un frame dura 4,17 ms). Legge il giro
+  solo dalla sua parte pubblica; la memoria (1024 bersagli) si prepara all'avvio, nel frame non alloca.
+- `storico.rs`, `esporta.rs`: lo storico dei giri (formato qui sotto), il record per scenario, la sessione e
+  l'esportazione CSV. La schermata Statistiche sta in `interfaccia.rs`, col grafico disegnato dal painter di egui.
 - `latenza.rs`, `misure.rs`, `banco.rs`, `allocazioni.rs`: le misure, il pannello F3 e il banco `--bench`.
+
+## Lo storico dei giri
+
+Un file TOML per giro in `%APPDATA%\aimpro\storico\`, scritto in `fine_giro` dopo il present dell'ultimo frame
+(prima in `<nome>.toml.nuovo`, poi rinominato). Il nome è `AAAAMMGG-hhmmss-mmm-<scenario>.toml` (ora locale; se
+esiste già, `-2`, `-3`…; dell'id nel nome restano solo lettere e cifre ASCII e `-`, il resto diventa `_`). Il banco non
+scrive nello storico.
+
+```toml
+formato = 1                     # versione del formato; un file con un numero più alto si salta
+scenario = "scatto"             # id dello scenario: record e statistiche sono per id
+data = "2026-11-22 14:00:34"    # ora locale di fine giro
+istante_ms = 1795352434530      # ms dal 1970 in UTC: l'ordine dei giri
+durata_s = 30.0
+colpi = 88
+errori = 0
+precisione = 1.0                # colpi / clic, fra 0 e 1; manca se non ci sono clic
+tempo_medio_ms = 338.28         # manca se non ci sono colpi
+overshoot = 89                  # tutti, anche sul bersaglio rimasto in campo alla fine
+
+[impostazioni]                  # quelle con cui si è giocato il giro
+gioco = "cs2"                   # "cs2" o "valorant"
+sensibilita = 1.25
+cm_360 = 41.56
+fov = 90.0
+dpi = 800.0
+vsync = false
+limite_fps = 0                  # 0 = nessun limite
+versione = "0.1.0"              # versione di aimpro
+
+[[bersagli]]                    # uno per bersaglio colpito, in ordine (al più 1024)
+tempo_ms = 297.44               # comparsa → colpo
+distanza_gradi = 24.78          # dal bersaglio precedente
+overshoot = 1
+```
+
+All'avvio un thread legge tutti i file, mentre la finestra si apre (il primo che serve lo storico, a fine giro o
+nelle Statistiche, lo aspetta); uno rovinato (o di un formato più nuovo, o senza i campi obbligatori) si salta e
+si conta, e la schermata Statistiche lo dice. In memoria i giri restano senza i bersagli. Il record di uno scenario
+sono i colpi del suo giro migliore; "nuovo record" quando un giro lo supera (pareggiarlo no; il primo giro di uno
+scenario è record se ha almeno un colpo). Uno scenario nuovo usa un suo `scenario = "<id>"` e gli stessi campi; campi in più vanno
+aggiunti con un valore predefinito (`#[serde(default)]`), così i file vecchi si leggono ancora; un cambio che i
+file vecchi non reggono alza `formato`.
+
+"Esporta CSV" scrive `aimpro-giri-AAAAMMGG-hhmmss.csv` nella cartella `aimpro` dei Documenti di Windows (quella vera,
+anche se spostata, da `SHGetKnownFolderPath`), una riga per giro. Per Excel in italiano: separatore `;`, decimali
+con la virgola, data `GG/MM/AAAA hh:mm:ss`, UTF-8 con il BOM, righe chiuse da CRLF.
 
 ## Come si prova
 
 ```
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # 45 test: sensibilità, impostazioni, visuale, giro, misure, tempo
+cargo test                      # 71 test: sensibilità, impostazioni, visuale, giro, registro, storico, CSV, misure, tempo
 cargo run --release             # il gioco, a schermo intero (Esc pausa, F3 pannello della latenza)
 cargo run --release -- --finestra            # in una finestra normale
 cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce, scrive misure\bench-<ora>.md
@@ -57,6 +113,9 @@ cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce,
 Il banco prende lo schermo intero per circa due minuti e simula il mouse con `SendInput` solo quando aimpro è in
 primo piano. Ogni fase di giro riparte da capo se la finestra perde il primo piano. Accanto al file dei risultati
 scrive `*.fasi.csv` con gli istanti QPC di ogni fase, per tagliare il CSV di PresentMon sulle stesse fasi.
+
+Per provare storico e statistiche senza toccare quelli veri si avvia aimpro con `APPDATA` puntato a una cartella di
+prova (lo storico e le impostazioni stanno lì dentro, in `aimpro\`).
 
 Il gioco col mouse vero e la sensazione al tatto li prova Carlo: i tester del browser non possono.
 

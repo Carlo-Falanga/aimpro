@@ -9,7 +9,16 @@ grafica va su DirectX 12 con il vsync spento di default e lo schermo intero escl
 ## Il primo scenario
 
 Scatto: 30 secondi, una sfera alla volta in un punto casuale della stanza. Colpita, ne compare un'altra; ogni clic a
-vuoto è un errore. Alla fine il riepilogo con colpi, errori, precisione e tempo medio per bersaglio.
+vuoto è un errore. Alla fine il riepilogo con colpi, errori, precisione, tempo medio per bersaglio e il confronto
+con il tuo record.
+
+## Statistiche
+
+Ogni giro finito resta sul PC, in `%APPDATA%\aimpro\storico\`: un file per giro con i numeri del giro, le
+impostazioni usate e, per ogni bersaglio, il tempo per colpirlo, la distanza dal precedente e gli overshoot (le volte
+che il mirino è entrato nella sfera e ne è uscito senza colpirla). Dal menu, "Statistiche" mostra l'andamento degli
+ultimi giri con la linea del record, i giri da quando hai aperto aimpro e l'elenco completo; "Esporta CSV" scrive un
+file per Excel nella cartella `aimpro` dei Documenti.
 
 La sensibilità si imposta come in CS2 o in Valorant, con il FOV e i DPI del mouse: i gradi per count sono quelli del
 gioco scelto. Le impostazioni restano in `%APPDATA%\aimpro\config.toml`.
