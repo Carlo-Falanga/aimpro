@@ -32,7 +32,7 @@ const LATO_MENU: i32 = 200;
 #[derive(Clone, Copy, Debug)]
 enum Tipo {
     Menu,
-    /// Il menu con il mouse che si muove sopra (senza clic): deve restare a un frame per refresh al massimo.
+    /// Il menu con il mouse che si muove sopra (senza clic): deve restare a 60 frame al secondo al massimo.
     MenuMouse,
     Giro {
         vsync: bool,
@@ -354,9 +354,10 @@ impl Banco {
         let nome =
             if self.non_valida { format!("{} (NON VALIDA: vedi le note)", f.nome) } else { f.nome.into() };
         let nel_giro = matches!(f.tipo, Tipo::Giro { .. });
+        let mem = sistema::memoria();
         let _ = writeln!(
             self.testo,
-            "| {} | {} | {:.0} | {} | {} | {} | {} | {} | {:.1}% / {:.1}% | {} | {} |",
+            "| {} | {} | {:.0} | {} | {} | {} | {} | {} | {} | {:.1}% / {:.1}% | {:.1} / {:.1} | {} | {} |",
             nome,
             if nel_giro { presentazione.as_str() } else { "-" },
             fps,
@@ -365,8 +366,15 @@ impl Banco {
             if nel_giro { r4(&m.count_present_vecchio) } else { "-".into() },
             if nel_giro { r(&m.count_present_recente) } else { "-".into() },
             if nel_giro { r(&m.clic_present) } else { "-".into() },
+            if nel_giro && m.attesa.n > 0 {
+                format!("{:.3} / {:.3}", m.attesa.mediana, m.lavoro.mediana)
+            } else {
+                "-".into()
+            },
             cpu.tempo_ms / durata_ms * 100.0,
             cpu.cicli_ms / durata_ms * 100.0,
+            sistema::Memoria::mb(mem.privata),
+            sistema::Memoria::mb(mem.impegnata),
             if frame == 0 {
                 format!("{alloc} in tutto")
             } else if nel_giro {
@@ -446,8 +454,8 @@ impl Banco {
                 Some(format!("mandati solo {iniettati} movimenti alla finestra su {attesi} attesi"))
             }
             Tipo::MenuMouse if frame == 0 => Some("il menu non ha ridisegnato".into()),
-            Tipo::MenuMouse if frame as f64 / (durata_ms / 1000.0) > app.hz_schermo * 1.05 => {
-                Some("il menu ha ridisegnato più di una volta per refresh".into())
+            Tipo::MenuMouse if frame as f64 / (durata_ms / 1000.0) > app.fps_menu() * 1.05 => {
+                Some(format!("il menu ha ridisegnato più di {:.0} volte al secondo", app.fps_menu()))
             }
             Tipo::MenuMouse => None,
             Tipo::Menu => None,
@@ -574,15 +582,28 @@ impl Banco {
              CPU del processo sul tempo della fase (100% = un core intero), senza il thread del banco che simula il \
              mouse, in due modi: a tempo (GetProcessTimes, a scatti di 15,6 ms) / a cicli (convertiti con la \
              frequenza calibrata, più bassa del vero se il core rallenta). Allocazioni per frame: di tutto il \
-             processo, poi quelle dentro wgpu e quelle del codice di aimpro fra get_current_texture e present.\n"
+             processo, poi quelle dentro wgpu e quelle del codice di aimpro fra get_current_texture e present. \
+             Memoria a fine fase, in MB: set di lavoro privato (la colonna \"Memoria\" di Gestione attività) / \
+             memoria impegnata privata. Attesa della swapchain (get_current_texture) e lavoro del frame (dalla \
+             lettura del mouse al ritorno di present): mediane sugli ultimi 4096 frame della fase.\n"
         );
         let _ = writeln!(
             out,
             "| fase | presentazione | fps | frame time | jitter | count→present (vecchio) | count→present \
-             (recente) | clic→present | CPU (tempo / cicli) | allocazioni per frame (processo / wgpu / aimpro) | eventi mouse |"
+             (recente) | clic→present | attesa swapchain / lavoro del frame | CPU (tempo / cicli) | memoria MB (privata / impegnata) | allocazioni \
+             per frame (processo / wgpu / aimpro) | eventi mouse |"
         );
-        let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|");
+        let _ = writeln!(out, "|---|---|---|---|---|---|---|---|---|---|---|---|---|");
         out.push_str(&self.testo);
+        let _ = writeln!(out, "\nMemoria alle tappe dell'avvio, in MB (privata / impegnata):\n");
+        for (tappa, m) in sistema::tappe_memoria() {
+            let _ = writeln!(
+                out,
+                "- {tappa}: {:.1} / {:.1}",
+                sistema::Memoria::mb(m.privata),
+                sistema::Memoria::mb(m.impegnata)
+            );
+        }
         if !self.note.is_empty() {
             let _ = writeln!(out, "\nNote:\n{}", self.note);
         }

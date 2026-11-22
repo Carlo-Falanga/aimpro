@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX2};
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcess, GetCurrentThread, GetCurrentThreadId, GetProcessTimes,
     GetThreadTimes,
@@ -103,6 +104,56 @@ pub fn cpu_thread() -> Cpu {
         Err(_) => 0.0,
     };
     Cpu { tempo_ms, cicli_ms: cicli_thread() as f64 / cicli_per_ms() }
+}
+
+/// La memoria del processo, in byte.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Memoria {
+    /// Il set di lavoro privato: le pagine in RAM che non condivide con altri processi. È il numero della colonna
+    /// "Memoria" di Gestione attività.
+    pub privata: usize,
+    /// La memoria impegnata privata (commit): comprende anche le pagine non in RAM.
+    pub impegnata: usize,
+}
+
+impl Memoria {
+    pub fn mb(b: usize) -> f64 {
+        b as f64 / (1024.0 * 1024.0)
+    }
+}
+
+/// La memoria del processo adesso.
+pub fn memoria() -> Memoria {
+    let mut m = PROCESS_MEMORY_COUNTERS_EX2 {
+        cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: pseudo-handle del processo corrente; la struttura EX2 comincia come PROCESS_MEMORY_COUNTERS e `cb`
+    // dice a Windows quanto è grande (Windows 10 1809 e successivi).
+    let ok = unsafe {
+        GetProcessMemoryInfo(GetCurrentProcess(), (&mut m as *mut PROCESS_MEMORY_COUNTERS_EX2).cast(), m.cb)
+    };
+    if ok.is_err() {
+        return Memoria::default();
+    }
+    Memoria { privata: m.PrivateWorkingSetSize, impegnata: m.PrivateUsage }
+}
+
+/// Le tappe dell'avvio con la memoria del processo in quel momento: il banco le riporta, per vedere da dove viene
+/// la memoria (finestra, DirectX 12, swapchain, egui...).
+static TAPPE: std::sync::Mutex<Vec<(&'static str, Memoria)>> = std::sync::Mutex::new(Vec::new());
+
+/// Segna una tappa dell'avvio. Alloca: solo fuori dal ciclo dei frame.
+pub fn segna_memoria(tappa: &'static str) {
+    let m = memoria();
+    if let Ok(mut t) = TAPPE.lock() {
+        t.push((tappa, m));
+    }
+}
+
+/// Le tappe segnate finora.
+pub fn tappe_memoria() -> Vec<(&'static str, Memoria)> {
+    TAPPE.lock().map(|t| t.clone()).unwrap_or_default()
 }
 
 /// La finestra `hwnd` è quella in primo piano?

@@ -6,8 +6,8 @@
 //!   il mouse subito dopo, all'ultimo momento.
 //! - Presentazione `Immediate` (vsync spento, tearing permesso) quando c'è, altrimenti `Fifo`; `Fifo` con il vsync.
 //! - Niente buffer di profondità né multisample: una stanza vista da dentro, una sfera e dei rettangoli.
-//! - A ogni frame si scrive solo il buffer delle uniformi (144 byte); i rettangoli si riscrivono quando cambia il
-//!   secondo mostrato o la risoluzione.
+//! - A ogni frame vanno nella lista dei comandi solo 128 byte di costanti immediate; i rettangoli si riscrivono
+//!   quando cambia il secondo mostrato o la risoluzione.
 
 use std::sync::Arc;
 
@@ -17,16 +17,32 @@ use wgpu::util::DeviceExt;
 use winit::window::Window;
 
 const MAX_RETT: usize = 64;
+/// Descrittori di texture e buffer che gli shader possono vedere insieme: ne usiamo meno di dieci (le uniformi e
+/// le texture di egui); 16 384 lasciano un margine largo e costano 0,5 MB.
+const DESCRITTORI: u32 = 16_384;
 
+/// Quello che cambia a ogni frame: costanti immediate (root constants), scritte nella lista dei comandi. Con un
+/// buffer di uniformi `write_buffer` costava a ogni frame una copia in un buffer di appoggio e una lista di comandi
+/// in più da mandare.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct Uniformi {
+struct Immediati {
     vp: [[f32; 4]; 4],
-    occhio: [f32; 4],
     sfera: [f32; 4],
     destra: [f32; 4],
     su: [f32; 4],
     schermo: [f32; 4],
+}
+
+/// I 128 byte che DirectX 12 dà alle costanti immediate in wgpu: `Immediati` ci deve stare.
+const DIMENSIONE_IMMEDIATI: u32 = 128;
+const _: () = assert!(std::mem::size_of::<Immediati>() as u32 <= DIMENSIONE_IMMEDIATI);
+
+/// Quello che nel giro non cambia: si riscrive solo quando cambia.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
+struct Uniformi {
+    occhio: [f32; 4],
 }
 
 #[repr(C)]
@@ -80,6 +96,7 @@ pub struct Grafica {
     b_stanza: wgpu::Buffer,
     vertici_stanza: u32,
     b_uniformi: wgpu::Buffer,
+    uniformi_scritte: Option<Uniformi>,
     b_rett: wgpu::Buffer,
     gruppo: wgpu::BindGroup,
     rett: [Rett; MAX_RETT],
@@ -126,8 +143,14 @@ pub fn scegli_presentazione(modi: &[wgpu::PresentMode], vsync: bool) -> wgpu::Pr
 
 impl Grafica {
     pub fn new(finestra: Arc<Window>, vsync: bool) -> Result<Self, String> {
+        crate::sistema::segna_memoria("finestra creata");
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::DX12;
+        // Le etichette servono solo agli strumenti di debug della scheda video: nella release non si passano a
+        // DirectX (wgpu le copierebbe a ogni encoder e render pass).
+        if !cfg!(debug_assertions) {
+            desc.flags |= wgpu::InstanceFlags::DISCARD_HAL_LABELS;
+        }
         let istanza = wgpu::Instance::new(desc);
         let dimensioni = finestra.inner_size();
         let surface = istanza.create_surface(finestra).map_err(|e| format!("superficie: {e}"))?;
@@ -138,12 +161,26 @@ impl Grafica {
             apply_limit_buckets: false,
         }))
         .map_err(|e| format!("nessuna scheda video DirectX 12: {e}"))?;
+        crate::sistema::segna_memoria("istanza DirectX 12 e scheda video");
         let (device, queue) = pollster::block_on(scheda.request_device(&wgpu::DeviceDescriptor {
             label: Some("aimpro"),
-            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(scheda.limits()),
+            // Su DirectX 12 wgpu le offre sempre.
+            required_features: wgpu::Features::IMMEDIATES,
+            required_limits: wgpu::Limits {
+                max_immediate_size: DIMENSIONE_IMMEDIATI,
+                // L'heap dei descrittori che gli shader vedono: wgpu lo crea grande quanto questo limite (1 000 000
+                // di descrittori, circa 31 MB di memoria impegnata). Qui ci sono una manciata di bind group.
+                max_non_sampler_bindings: DESCRITTORI,
+                ..wgpu::Limits::downlevel_defaults().using_resolution(scheda.limits())
+            },
+            // Blocchi di memoria piccoli: con `Performance` i blocchi della memoria che la CPU vede partono da 64 MB
+            // (4 MB con `MemoryUsage`) e il primo nasce già col dispositivo: misurato il 22/11, 60 MB in meno nel set
+            // di lavoro. Qui le risorse si creano all'avvio, non nel giro: i blocchi grandi non servono.
+            memory_hints: wgpu::MemoryHints::MemoryUsage,
             ..Default::default()
         }))
         .map_err(|e| format!("dispositivo: {e}"))?;
+        crate::sistema::segna_memoria("dispositivo DirectX 12");
 
         let capacita = surface.get_capabilities(&scheda);
         // Formato non sRGB: i colori degli shader e di egui sono già in gamma.
@@ -166,6 +203,7 @@ impl Grafica {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
+        crate::sistema::segna_memoria("swapchain");
 
         let modulo = device.create_shader_module(wgpu::include_wgsl!("scena.wgsl"));
         let layout_gruppo = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -184,7 +222,7 @@ impl Grafica {
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("scena"),
             bind_group_layouts: &[Some(&layout_gruppo)],
-            immediate_size: 0,
+            immediate_size: DIMENSIONE_IMMEDIATI,
         });
         let b_uniformi = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("uniformi"),
@@ -254,6 +292,7 @@ impl Grafica {
             premoltiplicato,
         );
 
+        crate::sistema::segna_memoria("shader e pipeline");
         let dati_stanza = stanza();
         let b_stanza = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("stanza"),
@@ -271,6 +310,7 @@ impl Grafica {
             formato,
             egui_wgpu::RendererOptions { dithering: false, ..Default::default() },
         );
+        crate::sistema::segna_memoria("buffer e renderer di egui");
 
         Ok(Grafica {
             surface,
@@ -286,6 +326,7 @@ impl Grafica {
             b_stanza,
             vertici_stanza: (dati_stanza.len() / 6) as u32,
             b_uniformi,
+            uniformi_scritte: None,
             b_rett,
             gruppo,
             rett: [Rett::default(); MAX_RETT],
@@ -343,22 +384,25 @@ impl Grafica {
         strato: Option<StratoEgui>,
     ) {
         let vista = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
+        let mut immediati = Immediati::zeroed();
         if let Some(s) = scena {
             let (secondi, frazione) = s.tempo.unwrap_or((0, 0.0));
             let (cx, cy, r) = s.sfera.map_or((0.0, 0.0, 0.0), |(c, r)| (c.x, c.y, r));
             let cz = s.sfera.map_or(0.0, |(c, _)| c.z);
-            let u = Uniformi {
+            immediati = Immediati {
                 vp: s.vp.to_cols_array_2d(),
-                occhio: [s.occhio.x as f32, s.occhio.y as f32, s.occhio.z as f32, 0.0],
                 sfera: [cx as f32, cy as f32, cz as f32, r as f32],
                 destra: [s.destra.x as f32, s.destra.y as f32, s.destra.z as f32, 0.0],
                 su: [s.su.x as f32, s.su.y as f32, s.su.z as f32, 0.0],
                 schermo: [self.config.width as f32, self.config.height as f32, frazione, self.scala],
             };
-            self.queue.write_buffer(&self.b_uniformi, 0, bytemuck::bytes_of(&u));
+            let u = Uniformi { occhio: [s.occhio.x as f32, s.occhio.y as f32, s.occhio.z as f32, 0.0] };
+            if self.uniformi_scritte != Some(u) {
+                self.queue.write_buffer(&self.b_uniformi, 0, bytemuck::bytes_of(&u));
+                self.uniformi_scritte = Some(u);
+            }
             let chiave = (secondi, self.config.width, self.config.height, s.tempo.is_some());
             if chiave != self.rett_scritti {
                 self.prepara_rettangoli(s.tempo.map(|t| t.0));
@@ -377,7 +421,7 @@ impl Grafica {
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scena"),
+                label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &vista,
                     resolve_target: None,
@@ -395,6 +439,7 @@ impl Grafica {
             if let Some(s) = scena {
                 pass.set_bind_group(0, &self.gruppo, &[]);
                 pass.set_pipeline(&self.p_stanza);
+                pass.set_immediates(0, bytemuck::bytes_of(&immediati));
                 pass.set_vertex_buffer(0, self.b_stanza.slice(..));
                 pass.draw(0..self.vertici_stanza, 0..1);
                 if s.sfera.is_some() {

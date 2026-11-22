@@ -34,11 +34,12 @@ Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
   loro istante. winit non si registra per gli stessi eventi (`listen_device_events(Never)`).
 - `app.rs`, il frame del giro: limite di fps (se c'è) → `get_current_texture` (l'attesa della swapchain) → i clic,
   ognuno valutato con la visuale del suo istante → il movimento letto all'ultimo momento → matrici → disegno →
-  `present`. Nel menu, in pausa e nel riepilogo non c'è ciclo: si ridisegna solo su evento, al massimo una volta per
-  refresh (col menu non in primo piano solo se ci passa sopra il mouse). Finestra non in primo piano o ridotta: il
+  `present`. Nel menu, in pausa e nel riepilogo non c'è ciclo: si ridisegna solo su evento, al massimo 60 volte al
+  secondo (scelta di Carlo, 22/11; col menu non in primo piano solo se ci passa sopra il mouse). Finestra non in primo piano o ridotta: il
   giro va in pausa e non si disegna. Il pannello F3 si ricalcola dopo `present`, sugli ultimi 4096 campioni.
 - `grafica.rs` e `scena.wgsl`: stanza a griglia, sfera disegnata per pixel (raggio contro sfera), mirino e tempo
-  come rettangoli istanziati, riscritti solo quando cambiano.
+  come rettangoli istanziati, riscritti solo quando cambiano. I dati del frame (visuale, sfera, schermo: 128 byte)
+  vanno nella lista dei comandi come costanti immediate (root constants di DX12), senza `write_buffer`.
 - `giro.rs`, `camera.rs`, `sensibilita.rs`, `config.rs`: lo scenario, la visuale, la conversione delle sensibilità
   (CS2 0,022 gradi per count, Valorant 0,07; FOV di CS2 orizzontale su 4:3, di Valorant su 16:9) e le impostazioni.
   Gli scenari durano 30 secondi (lo standard scelto da Carlo il 22/11/2026). Record e statistiche sono per id di
@@ -154,30 +155,81 @@ spento ha avuto mediana 0,43-0,45 ms e 99° percentile 1,20-1,40 ms nei due giri
 da 2-3 s.
 Il file completo di ogni giro sta in `misure\` (ignorata da git).
 
-Consumi fuori dal giro: menu fermo 0,1% di CPU e nessun frame dopo il primo; menu con il mouse che si muove sopra
-222 frame al secondo (al massimo uno per refresh dello schermo) e 10-18% di CPU; riepilogo e pausa sotto l'1%;
+Consumi fuori dal giro (21/11; quelli dopo la task dei consumi sono nella tabella "Consumi prima e dopo" qui
+sotto): menu fermo 0,1% di CPU e nessun frame dopo il primo; menu con il mouse che si muove sopra 222 frame al
+secondo (allora al massimo uno per refresh dello schermo) e 10-18% di CPU; riepilogo e pausa sotto l'1%;
 finestra ridotta a icona 0,1% e nessun frame. Nel giro con PresentMon del 21/11, con il mouse vero di Carlo che si
 muoveva sopra il menu, il menu era arrivato a 1214 frame al secondo e al 31% di CPU: qualcosa chiedeva ridisegni
 oltre il limite. La causa precisa non l'ho riprodotta col banco; ora il frame del menu parte solo da
-`RedrawRequested` e lì c'è il limite di uno per refresh, quindi nessuna richiesta, di Windows o di egui, lo può
-superare. Il banco lo controlla nella fase "menu, mouse in movimento": oltre il 105% della frequenza dello schermo
-la fase è NON VALIDA. CPU del processo, senza il
+`RedrawRequested` e lì c'è il limite (dal 22/11 60 frame al secondo), quindi nessuna richiesta, di Windows o di
+egui, lo può superare. Il banco lo controlla nella fase "menu, mouse in movimento": oltre il 105% del limite la fase
+è NON VALIDA. CPU del processo, senza il
 thread che simula il mouse, sul tempo della fase (100% = un core intero), misurata in due modi perché nessuno è
 esatto da solo: a tempo (`GetProcessTimes`, aggiornato a scatti di 15,6 ms: con il limite a 480 fps dà 46% contro
 25%) e a cicli (`QueryProcessCycleTime`, convertiti con la frequenza calibrata a pieno carico, quindi un po' più
 bassa del vero se il core rallenta).
 
-Allocazioni nel frame del giro, da `get_current_texture` al ritorno di `present`: 0 del codice di aimpro e 83 dentro
-wgpu (vista della texture, encoder, render pass, submit, present), contate dal banco con un allocatore che conta.
+Allocazioni nel frame del giro, da `get_current_texture` al ritorno di `present`: 0 del codice di aimpro e 68 dentro
+wgpu (vista della texture, encoder, render pass, submit, present; erano 83 prima della task dei consumi del 22/11),
+contate dal banco con un allocatore che conta.
 Col pannello F3 aperto se ne aggiungono circa 1,5 per frame in media: una dentro il disegno di egui e il resto nel
 pannello, che si ricalcola 4 volte al secondo dopo il present.
 
-Cosa costa il limite di fps: il movimento più recente arriva a `present` in circa 0,75 ms con qualunque limite
-(0,44 senza), ma un evento può aspettare fino a un frame intero prima di essere letto, quindi il ritardo del primo
-evento del frame cresce con il periodo: 0,45 ms senza limite, 1,85 a 480 fps, 3,97 a 240 fps. In cambio la CPU
-scende da circa il 65% al 25% (480 fps) o al 12-14% (240 fps). Senza limite si gioca con il ritardo più basso; il
-limite serve a chi vuole consumare meno. Col vsync il ritardo misurato fino a `present` è simile a quello del limite
-a 240 fps, ma col vsync il frame aspetta poi in coda il refresh dello schermo: quella parte la vede solo PresentMon.
+Cosa costa il limite di fps (banco del 22/11 dopo la task dei consumi, `misure\dopo-2.md`): il movimento più
+recente arriva a `present` in circa 0,72 ms con qualunque limite (0,37 senza), ma un evento può aspettare fino a un
+frame intero prima di essere letto, quindi il ritardo del primo evento del frame cresce con il periodo: count→present
+vecchio, mediana / 99°, 0,37 / 0,96 ms senza limite, 1,83 / 2,84 a 480 fps, 3,90 / 4,38 a 240 fps. In cambio la CPU
+(a cicli) scende da circa il 64% di un core al 21% (480 fps) o al 12% (240 fps). Senza limite si gioca con il
+ritardo più basso; il limite serve a chi vuole consumare meno. Col vsync il ritardo misurato fino a `present` è
+simile a quello del limite a 240 fps (3,93 / 4,37 ms, 8,5% di CPU), ma col vsync il frame aspetta poi in coda il
+refresh dello schermo: quella parte la vede solo PresentMon (4,00 ms in più, tabella qui sotto). I predefiniti
+(vsync spento, nessun limite) restano una scelta di Carlo.
+
+### Consumi prima e dopo (22/11/2026, task dei consumi)
+
+Due banchi completi di fila, `--secondi 15`, tutte le fasi valide: "prima" è `main` dopo la task delle statistiche
+con solo la misura della memoria aggiunta al banco (`misure\prima-2.md`), "dopo" il branch della task
+(`misure\dopo-2.md`). Schermo intero senza bordi (le impostazioni di questo PC), 240 Hz. Memoria = set di lavoro
+privato a fine fase, la colonna "Memoria" di Gestione attività. CPU = percentuale di un core, a cicli / a tempo
+(quella a tempo va a scatti di 15,6 ms e col limite di fps sbaglia molto). In Gestione attività la CPU si divide
+per i 16 core logici: 64% di un core è il 4% che si vede lì.
+
+| stato | memoria prima | memoria dopo | CPU prima | CPU dopo | frame al secondo prima / dopo |
+|---|---|---|---|---|---|
+| menu fermo | 124,8 MB | 57,8 MB | 0,1% / 0,4% | 0,1% / 0,0% | 0 / 0 |
+| menu, mouse che si muove sopra | 125,3 MB | 58,3 MB | 10,7% / 19,1% | 4,2% / 2,5% | 221 / 59 |
+| pausa | 125,5 MB | 59,3 MB | 0,1% / 0,0% | 0,1% / 0,2% | 0 / 0 |
+| riepilogo | 125,5 MB | 59,3 MB | 0,1% / 0,0% | 0,1% / 0,3% | 0 / 0 |
+| giro, vsync spento, senza limite | 125,3 MB | 58,3 MB | 67,7% / 64,9% | 64,1% / 64,7% | 2763 / 3128 |
+| giro, limite 240 fps | 125,2 MB | 58,2 MB | 13,0% / 0,3% | 12,4% / 7,7% | 240 / 240 |
+| giro, limite 480 fps | 125,2 MB | 58,2 MB | 23,6% / 28,6% | 21,4% / 23,5% | 480 / 480 |
+| giro, vsync acceso | 125,3 MB | 58,3 MB | 9,0% / 8,2% | 8,5% / 6,8% | 237 / 240 |
+
+Nel giro senza limite, nello stesso giro di misura: count→present vecchio 0,43 / 1,10 / 1,63 / 2,33 ms prima e
+0,37 / 0,96 / 1,47 / 2,20 dopo (mediana / 99° / 99,9° / massimo); lavoro del frame (dalla lettura del mouse al
+ritorno di `present`) 0,184 ms di mediana dopo (il banco di prima non lo riportava; nei banchi corti era 0,236 ms
+prima delle costanti immediate e 0,205 subito dopo); allocazioni dentro wgpu da 83 a 68 per frame, 0 del nostro
+codice prima e dopo. La CPU senza limite resta quella: il frame costa meno, quindi se ne fanno di più (3128 al
+secondo invece di 2763) e il core resta occupato uguale.
+
+Da dove viene la memoria (tappe dell'avvio nel file del banco, set di lavoro privato):
+
+| tappa | prima | dopo | perché |
+|---|---|---|---|
+| programma pronto | 4,2 MB | 3,2 MB | gli anelli di attesa e lavoro del frame sono lunghi quanto il pannello F3 (4096 campioni, non 65 536) |
+| istanza DirectX 12 e scheda video | +22,2 MB | +20,2 MB | i driver: wgpu apre un dispositivo DX12 su ogni scheda (qui anche la Radeon integrata) per sceglierne una; non si evita da wgpu |
+| dispositivo DirectX 12 | +82,2 MB | +21,8 MB | con `MemoryHints::Performance` wgpu crea subito un blocco di memoria visibile alla CPU da 64 MB: con `MemoryUsage` i blocchi partono da 4 MB (-60 MB). L'heap dei descrittori era da 1 000 000 di voci, ora 16 384: -31 MB di memoria impegnata, il set di lavoro non cambia |
+| swapchain, pipeline, egui | +3,9 MB | +1,9 MB | la differenza non l'ho attribuita a una modifica sola |
+| primo frame del giro e del menu | +10,9 MB | +9,4 MB | l'atlante dei caratteri di egui era largo quanto il lato massimo delle texture (16 384 pixel), ora 2048 (-1,5 MB) |
+
+Dove va la CPU col limite di fps: il lavoro del frame è circa 0,19 ms (5% di un core a 240 fps); il resto è
+l'attesa fino alla scadenza. Il timer ad alta risoluzione di Windows su questo PC si sveglia in ritardo a scatti di
+circa 0,5 ms (misurato il 22/11 nel programma, due fasi col limite: da un terzo a metà dei risvegli oltre 0,2 ms, uno su otto o
+su sei oltre 0,5 ms, fino a 1,1 ms),
+quindi l'ultimo tratto, 0,5 ms prima della scadenza, si fa girando a vuoto. Un tratto più corto (provato: adattato
+al ritardo visto) qui non scende, perché i ritardi alti sono frequenti; accorciarlo a forza farebbe arrivare più
+frame in ritardo (frame pacing peggiore) e resta fuori, perché la latenza e il ritmo dei frame vengono prima. Il
+tratto a vuoto costa circa il 7% di un core a 240 fps.
 
 ### Da PresentMon (22/11/2026, PresentMon 2.6.0 insieme a `aimpro --bench --secondi 15`)
 
