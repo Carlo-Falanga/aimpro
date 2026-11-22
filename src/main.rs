@@ -29,7 +29,8 @@ use winit::event_loop::{DeviceEvents, EventLoop};
 #[global_allocator]
 static ALLOCATORE: allocazioni::Contatore = allocazioni::Contatore;
 
-/// Avvisi ed errori di wgpu e winit sulla console (in debug) e nel file degli errori.
+/// Avvisi ed errori di wgpu e winit sulla console (in debug). Gli errori che impediscono di partire vanno anche
+/// in `errore.txt` e in una finestra di messaggio (`sistema::errore_fatale`).
 struct Registro;
 
 impl log::Log for Registro {
@@ -56,16 +57,14 @@ fn argomento(nome: &str) -> Option<String> {
 
 fn main() {
     let _ = log::set_logger(&REGISTRO).map(|()| log::set_max_level(log::LevelFilter::Warn));
-    // Un errore fatale finisce in un file accanto alle impostazioni: senza console non lo vedrebbe nessuno.
-    let cartella = config::percorso_predefinito().parent().map(PathBuf::from).unwrap_or_default();
+    let col_banco = std::env::args().any(|a| a == "--bench");
+    // Un panic finisce in errore.txt e in una finestra di messaggio: senza console non lo vedrebbe nessuno.
     std::panic::set_hook(Box::new(move |info| {
-        let _ = std::fs::create_dir_all(&cartella);
-        let testo = format!("{info}\n\n{}\n", std::backtrace::Backtrace::force_capture());
-        let _ = std::fs::write(cartella.join("errore.txt"), &testo);
-        eprintln!("{testo}");
+        let testo = format!("{info}\n\n{}", std::backtrace::Backtrace::force_capture());
+        sistema::errore_fatale(&testo, col_banco);
     }));
 
-    let banco = std::env::args().any(|a| a == "--bench").then(|| {
+    let banco = col_banco.then(|| {
         // Al più 50 s per fase: il giro dura 60 s e finirebbe dentro la fase.
         let secondi = argomento("--secondi")
             .and_then(|s| s.parse::<f64>().ok())
@@ -80,12 +79,21 @@ fn main() {
         banco::Banco::new(uscita, secondi)
     });
 
-    let event_loop = EventLoop::new().expect("ciclo degli eventi");
+    let event_loop = match EventLoop::new() {
+        Ok(el) => el,
+        Err(e) => {
+            sistema::errore_fatale(&format!("il ciclo degli eventi non parte: {e}"), col_banco);
+            std::process::exit(1);
+        }
+    };
     // Il mouse lo legge il thread del Raw Input: winit non deve registrarsi per gli stessi eventi (la
     // registrazione è una sola per processo).
     event_loop.listen_device_events(DeviceEvents::Never);
     let mut app = app::App::new(banco);
     if let Err(e) = event_loop.run_app(&mut app) {
-        eprintln!("aimpro: {e}");
+        sistema::errore_fatale(&format!("il ciclo degli eventi si è fermato: {e}"), col_banco);
+    }
+    if sistema::ERRORE_FATALE.load(std::sync::atomic::Ordering::SeqCst) {
+        std::process::exit(1);
     }
 }

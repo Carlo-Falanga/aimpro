@@ -82,11 +82,27 @@ pub fn percorso_predefinito() -> PathBuf {
     base.join("aimpro").join("config.toml")
 }
 
+/// I campi che il file non ha prendono i predefiniti di serde, cioè quelli di CS2: sensibilità e FOV vanno invece
+/// presi dal gioco scritto nel file (un file con solo `gioco = "valorant"` non deve dare la sensibilità di CS2).
+fn con_predefiniti_del_gioco(mut c: Config, testo: &str) -> Config {
+    let Ok(tabella) = testo.parse::<toml::Table>() else {
+        return c;
+    };
+    let p = Config::predefinita(c.gioco);
+    if !tabella.contains_key("sensibilita") {
+        c.sensibilita = p.sensibilita;
+    }
+    if !tabella.contains_key("fov") {
+        c.fov = p.fov;
+    }
+    c
+}
+
 /// Legge le impostazioni. Se il file non c'è o non si legge, i predefiniti e il motivo.
 pub fn carica(percorso: &Path) -> (Config, Option<String>) {
     match std::fs::read_to_string(percorso) {
         Ok(testo) => match toml::from_str::<Config>(&testo) {
-            Ok(c) => (c.normalizzata(), None),
+            Ok(c) => (con_predefiniti_del_gioco(c, &testo).normalizzata(), None),
             Err(e) => (Config::default(), Some(format!("impostazioni illeggibili, uso i predefiniti: {e}"))),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Config::default(), None),
@@ -177,6 +193,20 @@ mod test {
         assert_eq!(c.gioco, Gioco::Valorant);
         assert_eq!(c.sensibilita, 0.5);
         assert_eq!(c.dpi, 800.0);
+    }
+
+    #[test]
+    fn i_campi_mancanti_prendono_il_predefinito_del_gioco_del_file() {
+        let d = cartella_di_prova("gioco-mancanti");
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("config.toml");
+        std::fs::write(&p, "gioco = \"valorant\"\n").unwrap();
+        let (c, avviso) = carica(&p);
+        assert_eq!(avviso, None);
+        assert_eq!(c.gioco, Gioco::Valorant);
+        assert_eq!(c.sensibilita, Gioco::Valorant.sensibilita_predefinita());
+        assert_eq!(c.fov, Gioco::Valorant.fov_predefinito());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -2,8 +2,8 @@
 
     python strumenti/presentmon_fasi.py misure/presentmon.csv misure/bench-presentmon.fasi.csv
 
-Taglia le righe con la colonna CPUStartQPC (PresentMon --qpc_time) sugli istanti QPC delle fasi scritti dal banco
-e stampa, per ogni fase, mediana / 99° percentile delle colonne di latenza che ci sono, la modalità di
+Taglia le righe con la colonna TimeInQPC, l'istante del present (PresentMon --qpc_time), sugli istanti QPC delle
+fasi scritti dal banco, e stampa, per ogni fase, mediana / 99° percentile delle colonne di latenza che ci sono, la modalità di
 presentazione più frequente e l'uso della GPU (somma di MsGPUBusy sulla durata della fase).
 """
 
@@ -59,14 +59,17 @@ def main(percorso_csv, percorso_fasi):
         print("CSV vuoto")
         return
     presenti = [(c, n) for c, n in COLONNE if c in righe[0]]
-    qpc = "CPUStartQPC"
+    # Ogni riga va nella fase in cui è avvenuto il present (TimeInQPC). CPUStartQPC è l'inizio del frame: dopo una
+    # pausa lunga cade nella fase prima e ci porta un intervallo di secondi che non è suo.
+    qpc = "TimeInQPC" if "TimeInQPC" in righe[0] else "CPUStartQPC"
     if qpc not in righe[0]:
-        sys.exit("manca la colonna CPUStartQPC: PresentMon va lanciato con --qpc_time")
+        sys.exit("mancano TimeInQPC e CPUStartQPC: PresentMon va lanciato con --qpc_time")
+    print(f"Righe assegnate alle fasi con {qpc}.\n")
     # Le righe senza istante (l'ultima, se PresentMon è stato chiuso mentre scriveva) non si possono assegnare.
     prima = len(righe)
     righe = [r for r in righe if numero(r.get(qpc)) is not None]
     if len(righe) < prima:
-        print(f"Righe senza CPUStartQPC scartate: {prima - len(righe)}\n")
+        print(f"Righe senza {qpc} scartate: {prima - len(righe)}\n")
     for r in righe:
         r[qpc] = int(float(r[qpc]))
 

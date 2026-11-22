@@ -594,7 +594,7 @@ impl ApplicationHandler for App {
         let finestra = match el.create_window(attributi) {
             Ok(f) => Arc::new(f),
             Err(e) => {
-                eprintln!("aimpro: finestra non creata: {e}");
+                sistema::errore_fatale(&format!("la finestra non si crea: {e}"), self.banco.is_some());
                 el.exit();
                 return;
             }
@@ -602,7 +602,7 @@ impl ApplicationHandler for App {
         match Grafica::new(finestra.clone(), self.config.vsync) {
             Ok(g) => self.grafica = Some(g),
             Err(e) => {
-                eprintln!("aimpro: {e}");
+                sistema::errore_fatale(&format!("la grafica non parte: {e}"), self.banco.is_some());
                 el.exit();
                 return;
             }

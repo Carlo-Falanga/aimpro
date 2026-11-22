@@ -1,6 +1,7 @@
 //! Piccole chiamate a Windows: tempo di CPU del processo, finestra in primo piano, input simulato per il banco.
 
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::{FILETIME, HWND, LPARAM, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::ClientToScreen;
@@ -15,9 +16,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, ClipCursor, GetClientRect, GetClipCursor, GetCursorPos, GetForegroundWindow,
-    GetWindowThreadProcessId, PostMessageW, SetCursorPos, SetForegroundWindow, WM_MOUSEMOVE,
+    GetWindowThreadProcessId, MB_ICONERROR, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW, PostMessageW,
+    SetCursorPos, SetForegroundWindow, WM_MOUSEMOVE,
 };
+use windows::core::HSTRING;
 
+use crate::config;
 use crate::tempo;
 
 // La CPU si misura in due modi, perché nessuno dei due è esatto da solo:
@@ -235,6 +239,40 @@ pub fn centro_finestra(hwnd: isize) -> Option<(i32, i32)> {
     // SAFETY: handle della nostra finestra e puntatore valido.
     unsafe { GetClientRect(HWND(hwnd as *mut _), &mut r) }.ok()?;
     Some(((r.left + r.right) / 2, (r.top + r.bottom) / 2))
+}
+
+/// C'è stato un errore fatale: `main` esce con codice 1 (lo legge `presentmon.ps1`).
+pub static ERRORE_FATALE: AtomicBool = AtomicBool::new(false);
+
+/// Un errore che ferma il programma (all'avvio o un panic): nella release non c'è la console, quindi va in
+/// `%APPDATA%\aimpro\errore.txt` e in una finestra di messaggio, sopra lo schermo intero e col cursore libero
+/// (nel giro è bloccato al centro e non si potrebbe premere OK). Col banco niente finestra (nessuno la
+/// chiuderebbe): basta il file.
+pub fn errore_fatale(testo: &str, banco: bool) {
+    ERRORE_FATALE.store(true, Ordering::SeqCst);
+    // Anche col banco: con panic = "abort" il Drop del banco, che lo libera, non gira.
+    libera_cursore();
+    eprintln!("aimpro: {testo}");
+    let file = config::percorso_predefinito().with_file_name("errore.txt");
+    if let Some(cartella) = file.parent() {
+        let _ = std::fs::create_dir_all(cartella);
+    }
+    let _ = std::fs::write(&file, format!("{testo}\n"));
+    if !banco {
+        let messaggio = format!(
+            "aimpro si è fermato per un errore:\n\n{testo}\n\nIl testo è anche in {}",
+            file.display()
+        );
+        // SAFETY: stringhe valide per tutta la chiamata, nessuna finestra madre.
+        unsafe {
+            MessageBoxW(
+                None,
+                &HSTRING::from(messaggio),
+                &HSTRING::from("aimpro"),
+                MB_OK | MB_ICONERROR | MB_TOPMOST | MB_SETFOREGROUND,
+            )
+        };
+    }
 }
 
 /// L'handle della finestra come intero (per passarlo fra i thread).
