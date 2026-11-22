@@ -31,9 +31,12 @@ use crate::grafica::{Grafica, Scena, StratoEgui};
 use crate::ingresso::{Clic, Ingresso};
 use crate::interfaccia::{self, Azione, InfoMenu};
 use crate::latenza::{CAMPIONI_PANNELLO, Latenza, testo_pannello};
+use crate::registro::Registro;
 use crate::sensibilita::{fov_verticale, radianti_per_count};
 use crate::sistema;
+use crate::storico::{self, Confronto, GiroSalvato, Ora, Storico};
 use crate::tempo;
+use crate::{esporta, giro};
 
 const OCCHIO: DVec3 = DVec3::new(0.0, 1.7, 0.0);
 /// Il pannello della latenza nel giro si ricalcola 4 volte al secondo.
@@ -45,6 +48,7 @@ pub enum Stato {
     Giro,
     Pausa,
     Riepilogo(Riepilogo),
+    Statistiche,
 }
 
 /// Lo strato egui disegnato sopra il giro (pannello della latenza), ricalcolato ogni tanto.
@@ -65,6 +69,19 @@ pub struct App {
     egui_stato: Option<egui_winit::State>,
     pub ingresso: Arc<Ingresso>,
     pub giro: Giro,
+    /// Tempi, distanze e overshoot dei bersagli del giro: la memoria è preparata qui, nel frame non alloca.
+    registro: Registro,
+    /// I giri salvati; il giro finito si aggiunge e si scrive in `fine_giro`. Si leggono in un thread partito
+    /// all'avvio (`storico_in_arrivo`), così con migliaia di file la finestra non aspetta: vedi `storico()`.
+    storico: Option<Storico>,
+    storico_in_arrivo: Option<std::thread::JoinHandle<Storico>>,
+    /// Quando è partito aimpro: i giri da qui in poi sono la sessione.
+    avvio_ms: i64,
+    /// L'ultimo giro rispetto al record di prima (nel riepilogo); `None` col banco, che non salva i giri.
+    confronto: Option<Confronto>,
+    avviso_storico: Option<String>,
+    /// L'esito dell'ultimo "Esporta CSV", mostrato nella schermata Statistiche.
+    esportato: Option<String>,
     pub latenza: Latenza,
     pub stato: Stato,
     imbardata: f64,
@@ -128,6 +145,8 @@ impl App {
         let (config, avviso) = config::carica(&percorso_config);
         let egui_ctx = egui::Context::default();
         interfaccia::stile(&egui_ctx);
+        // La sessione parte adesso, anche se i file dello storico finiscono di leggersi dopo.
+        let avvio = storico::istante_ms();
         let mut app = App {
             config,
             percorso_config,
@@ -138,6 +157,16 @@ impl App {
             egui_stato: None,
             ingresso: Ingresso::avvia(),
             giro: Giro::new(OCCHIO, Caso::new(tempo::qpc() as u64)),
+            registro: Registro::new(OCCHIO),
+            storico: None,
+            // Il banco non usa lo storico: niente lettura che si mescoli alle sue misure.
+            storico_in_arrivo: banco
+                .is_none()
+                .then(|| std::thread::spawn(move || Storico::carica(storico::cartella_predefinita(), avvio))),
+            avvio_ms: avvio,
+            confronto: None,
+            avviso_storico: None,
+            esportato: None,
             latenza: Latenza::new(),
             stato: Stato::Menu,
             imbardata: 0.0,
@@ -241,6 +270,7 @@ impl App {
         self.imbardata = 0.0;
         self.beccheggio = 0.0;
         self.giro.inizia(self.ms(tempo::qpc()));
+        self.registro.inizia(&self.giro, camera::avanti(self.imbardata, self.beccheggio));
         self.latenza.azzera();
         self.prossima_scadenza = 0;
         self.stato = Stato::Giro;
@@ -297,9 +327,55 @@ impl App {
 
     fn fine_giro(&mut self) {
         self.ingresso.imposta_attivo(false);
-        self.stato = Stato::Riepilogo(self.giro.riepilogo());
+        let r = self.giro.riepilogo();
+        self.salva_giro(&r);
+        self.stato = Stato::Riepilogo(r);
         self.cursore_di_gioco(false);
         self.ridisegna();
+    }
+
+    /// Il giro finito va nello storico: dopo il present dell'ultimo frame, fuori dal tratto fra mouse e schermo.
+    /// Il banco non salva: i suoi giri sono tagliati a metà e lo storico è di chi gioca.
+    fn salva_giro(&mut self, r: &Riepilogo) {
+        self.confronto = None;
+        self.avviso_storico = None;
+        if self.banco.is_some() {
+            return;
+        }
+        let ora = Ora::adesso();
+        let g = GiroSalvato::nuovo(
+            storico::SCATTO,
+            giro::DURATA_GIRO_MS / 1000.0,
+            r,
+            &self.registro,
+            &self.config,
+            ora,
+            storico::istante_ms(),
+        );
+        let (confronto, scritto) = self.storico().aggiungi(g, ora);
+        self.confronto = Some(confronto);
+        if let Err(e) = scritto {
+            self.avviso_storico = Some(format!("giro non salvato nello storico: {e}"));
+        }
+    }
+
+    /// Lo storico letto dal thread partito all'avvio; se non ha ancora finito, lo aspetta.
+    fn storico(&mut self) -> &mut Storico {
+        let (in_arrivo, avvio) = (&mut self.storico_in_arrivo, self.avvio_ms);
+        self.storico.get_or_insert_with(|| {
+            in_arrivo
+                .take()
+                .and_then(|t| t.join().ok())
+                .unwrap_or_else(|| Storico::carica(storico::cartella_predefinita(), avvio))
+        })
+    }
+
+    fn esporta_csv(&mut self) {
+        let cartella = esporta::documenti().join("aimpro");
+        self.esportato = Some(match esporta::esporta(self.storico().giri(), &cartella, Ora::adesso()) {
+            Ok(p) => format!("Esportato in {}", p.display()),
+            Err(e) => format!("Esportazione non riuscita in {}: {e}", cartella.display()),
+        });
     }
 
     /// Applica i count fino ai totali `(dx, dy)`.
@@ -357,12 +433,15 @@ impl App {
         for i in 0..n {
             let c = self.clic[i];
             self.applica(c.dx, c.dy);
-            let esito = self.giro.clic(self.ms(c.qpc), camera::avanti(self.imbardata, self.beccheggio));
+            let d = camera::avanti(self.imbardata, self.beccheggio);
+            let esito = self.giro.clic(self.ms(c.qpc), d);
+            self.registro.clic(&self.giro, esito, d);
             if primo_clic == 0 && esito != Esito::Ignorato {
                 primo_clic = c.qpc;
             }
         }
         self.applica(lettura.dx, lettura.dy);
+        self.registro.osserva(&self.giro, camera::avanti(self.imbardata, self.beccheggio));
 
         let adesso = self.ms(letto);
         let finito = self.giro.aggiorna(adesso);
@@ -452,6 +531,12 @@ impl App {
             (g.scheda.name.clone(), format!("{:?}", g.presentazione()))
         });
         let avviso = self.avviso.clone();
+        let (confronto, avviso_storico, esportato) =
+            (self.confronto, self.avviso_storico.clone(), self.esportato.clone());
+        if stato_ora == Stato::Statistiche {
+            self.storico();
+        }
+        let storico = self.storico.as_ref();
         // Fuori dal giro le misure non cambiano: il testo si ricalcola solo se ci sono frame nuovi.
         let pannello = if self.pannello_visibile {
             let n = self.latenza.versione();
@@ -473,7 +558,11 @@ impl App {
                     &InfoMenu { scheda: &scheda, presentazione: &presentazione, avviso: avviso.as_deref() },
                 ),
                 Stato::Pausa => interfaccia::pausa(ui, restanti),
-                Stato::Riepilogo(r) => interfaccia::riepilogo(ui, &r),
+                Stato::Riepilogo(r) => {
+                    interfaccia::riepilogo(ui, &r, confronto.as_ref(), avviso_storico.as_deref())
+                }
+                Stato::Statistiche => storico
+                    .map_or(Azione::TornaAlMenu, |s| interfaccia::statistiche(ui, s, esportato.as_deref())),
                 Stato::Giro => Azione::Nessuna,
             };
             if let Some(t) = &pannello {
@@ -536,6 +625,16 @@ impl App {
             Azione::Inizia => self.inizia_giro(),
             Azione::Riprendi => self.riprendi(),
             Azione::EsciDalGiro | Azione::TornaAlMenu => self.torna_al_menu(),
+            Azione::Statistiche => {
+                self.salva_se_serve();
+                self.torna_al_menu();
+                self.esportato = None;
+                self.stato = Stato::Statistiche;
+            }
+            Azione::EsportaCsv => {
+                self.esporta_csv();
+                self.ridisegna();
+            }
             Azione::Chiudi => {
                 self.salva_se_serve();
                 std::process::exit(0)
@@ -679,6 +778,7 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::Escape) => match self.stato {
                         Stato::Giro => self.pausa(),
                         Stato::Pausa => self.riprendi(),
+                        Stato::Statistiche => self.torna_al_menu(),
                         _ => {}
                     },
                     PhysicalKey::Code(KeyCode::F3) => {

@@ -12,14 +12,17 @@ mod app;
 mod banco;
 mod camera;
 mod config;
+mod esporta;
 mod giro;
 mod grafica;
 mod ingresso;
 mod interfaccia;
 mod latenza;
 mod misure;
+mod registro;
 mod sensibilita;
 mod sistema;
+mod storico;
 mod tempo;
 
 use std::path::PathBuf;
