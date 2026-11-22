@@ -39,6 +39,8 @@ use crate::tempo;
 use crate::{esporta, giro};
 
 const OCCHIO: DVec3 = DVec3::new(0.0, 1.7, 0.0);
+/// I frame al secondo, al massimo, nel menu, in pausa e nel riepilogo.
+const FPS_MENU: f64 = 60.0;
 /// Il lato massimo delle texture di egui, quindi la larghezza dell'atlante dei caratteri.
 const LATO_ATLANTE: usize = 2048;
 /// Il pannello della latenza nel giro si ricalcola 4 volte al secondo.
@@ -233,17 +235,22 @@ impl App {
         tempo::ms(q - self.origine)
     }
 
-    /// Chiede un frame del menu. Non disegna subito: lo fa `about_to_wait`, al massimo una volta per refresh dello
-    /// schermo, così un mouse a 1000 Hz sopra il menu non diventa 1000 frame al secondo.
+    /// Chiede un frame del menu. Non disegna subito: lo fa `about_to_wait`, al massimo 60 volte al secondo, così un
+    /// mouse a 1000 Hz sopra il menu non diventa 1000 frame al secondo.
     fn ridisegna(&mut self) {
         let ora = Instant::now();
         self.prossimo_ridisegno = Some(self.prossimo_ridisegno.map_or(ora, |t| t.min(ora)));
     }
 
-    /// Il tempo minimo fra due frame del menu: un refresh dello schermo (almeno 60 Hz, al più 240).
+    /// Quanti frame al secondo, al massimo, fuori dal giro: 60 (scelta di Carlo, 22/11), o la frequenza dello
+    /// schermo se è più bassa. Il menu non è il giro: più frame consumano CPU senza servire a niente.
+    pub fn fps_menu(&self) -> f64 {
+        if self.hz_schermo > 0.0 { self.hz_schermo.min(FPS_MENU) } else { FPS_MENU }
+    }
+
+    /// Il tempo minimo fra due frame del menu.
     fn intervallo_menu(&self) -> Duration {
-        let hz = if self.hz_schermo > 0.0 { self.hz_schermo.clamp(60.0, 240.0) } else { 60.0 };
-        Duration::from_secs_f64(1.0 / hz)
+        Duration::from_secs_f64(1.0 / self.fps_menu())
     }
 
     /// Nel giro il cursore di Windows è nascosto e fermo al centro della finestra; fuori è libero.
@@ -801,7 +808,7 @@ impl ApplicationHandler for App {
                     _ => {}
                 }
             }
-            // Fuori dal giro al massimo un frame per refresh, anche quando Windows chiede di ridisegnare da sé
+            // Fuori dal giro al massimo 60 frame al secondo, anche quando Windows chiede di ridisegnare da sé
             // (succede a raffica mentre il mouse si muove sopra la finestra): il frame in più si rimanda.
             WindowEvent::RedrawRequested if !nel_giro && !self.ridotta => {
                 if self.ultimo_frame_menu.is_some_and(|u| u.elapsed() < self.intervallo_menu()) {

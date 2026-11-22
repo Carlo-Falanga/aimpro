@@ -32,7 +32,7 @@ const LATO_MENU: i32 = 200;
 #[derive(Clone, Copy, Debug)]
 enum Tipo {
     Menu,
-    /// Il menu con il mouse che si muove sopra (senza clic): deve restare a un frame per refresh al massimo.
+    /// Il menu con il mouse che si muove sopra (senza clic): deve restare a 60 frame al secondo al massimo.
     MenuMouse,
     Giro {
         vsync: bool,
@@ -449,8 +449,8 @@ impl Banco {
                 Some(format!("mandati solo {iniettati} movimenti alla finestra su {attesi} attesi"))
             }
             Tipo::MenuMouse if frame == 0 => Some("il menu non ha ridisegnato".into()),
-            Tipo::MenuMouse if frame as f64 / (durata_ms / 1000.0) > app.hz_schermo * 1.05 => {
-                Some("il menu ha ridisegnato più di una volta per refresh".into())
+            Tipo::MenuMouse if frame as f64 / (durata_ms / 1000.0) > app.fps_menu() * 1.05 => {
+                Some(format!("il menu ha ridisegnato più di {:.0} volte al secondo", app.fps_menu()))
             }
             Tipo::MenuMouse => None,
             Tipo::Menu => None,
