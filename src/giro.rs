@@ -1,11 +1,12 @@
-//! Il giro dello scenario "Scatto": una sfera alla volta in un punto a caso davanti al giocatore, 60 secondi.
+//! Il giro dello scenario "Scatto": una sfera alla volta in un punto a caso davanti al giocatore, 30 secondi
+//! (la durata standard degli scenari).
 //! Logica pura: i tempi (millisecondi) arrivano da fuori, dall'istante degli eventi, così si prova nei test.
 
 use glam::DVec3;
 
 use crate::camera::{avanti, colpisce_sfera};
 
-pub const DURATA_GIRO_MS: f64 = 60_000.0;
+pub const DURATA_GIRO_MS: f64 = 30_000.0;
 
 /// Dove compaiono i bersagli, in angoli rispetto a chi guarda dritto davanti (-Z).
 pub mod zona {
@@ -215,8 +216,8 @@ mod test {
     }
 
     #[test]
-    fn dura_60_secondi() {
-        assert_eq!(DURATA_GIRO_MS, 60_000.0);
+    fn dura_30_secondi() {
+        assert_eq!(DURATA_GIRO_MS, 30_000.0);
     }
 
     #[test]
@@ -255,12 +256,12 @@ mod test {
     }
 
     #[test]
-    fn finisce_a_60_secondi_e_dopo_i_clic_non_contano() {
+    fn finisce_a_30_secondi_e_dopo_i_clic_non_contano() {
         let mut g = giro(4);
         g.inizia(1000.0);
-        assert!(!g.aggiorna(60_999.0));
-        assert!(g.aggiorna(61_000.0));
-        assert_eq!(g.clic(61_001.0, mira(&g)), Esito::Ignorato);
+        assert!(!g.aggiorna(30_999.0));
+        assert!(g.aggiorna(31_000.0));
+        assert_eq!(g.clic(31_001.0, mira(&g)), Esito::Ignorato);
         assert_eq!(g.colpi, 0);
     }
 
@@ -268,8 +269,8 @@ mod test {
     fn conta_l_istante_dell_evento() {
         let mut g = giro(5);
         g.inizia(0.0);
-        assert_eq!(g.clic(59_999.0, mira(&g)), Esito::Colpo);
-        assert_eq!(g.clic(60_000.0, mira(&g)), Esito::Ignorato);
+        assert_eq!(g.clic(29_999.0, mira(&g)), Esito::Colpo);
+        assert_eq!(g.clic(30_000.0, mira(&g)), Esito::Ignorato);
         assert_eq!(g.clic(-1.0, mira(&g)), Esito::Ignorato);
     }
 
@@ -283,7 +284,7 @@ mod test {
         g.clic(1000.0, lontano(&g));
         g.clic(1100.0, lontano(&g));
         g.clic(1500.0, mira(&g)); // bersaglio 3 in 600 ms
-        g.aggiorna(60_000.0);
+        g.aggiorna(30_000.0);
         let r = g.riepilogo();
         assert_eq!((r.colpi, r.errori), (3, 3));
         assert!((r.precisione.unwrap() - 0.5).abs() < 1e-12);
@@ -294,7 +295,7 @@ mod test {
     fn senza_clic_niente_precisione_ne_tempo() {
         let mut g = giro(7);
         g.inizia(0.0);
-        g.aggiorna(60_000.0);
+        g.aggiorna(30_000.0);
         let r = g.riepilogo();
         assert_eq!(r.precisione, None);
         assert_eq!(r.tempo_medio_ms, None);
@@ -307,11 +308,11 @@ mod test {
         g.pausa(10_000.0);
         assert_eq!(g.clic(20_000.0, mira(&g)), Esito::Ignorato);
         g.riprendi(40_000.0);
-        assert_eq!(g.restante_ms(40_000.0), 50_000.0);
-        assert!(!g.aggiorna(89_999.0));
+        assert_eq!(g.restante_ms(40_000.0), 20_000.0);
+        assert!(!g.aggiorna(59_999.0));
         g.clic(40_500.0, mira(&g));
         assert!((g.riepilogo().tempo_medio_ms.unwrap() - 10_500.0).abs() < 1e-9);
-        assert!(g.aggiorna(90_000.0));
+        assert!(g.aggiorna(60_000.0));
     }
 
     #[test]
@@ -320,10 +321,10 @@ mod test {
         g.inizia(0.0);
         g.clic(100.0, mira(&g));
         g.clic(200.0, lontano(&g));
-        g.aggiorna(60_000.0);
+        g.aggiorna(30_000.0);
         g.inizia(70_000.0);
         assert_eq!((g.colpi, g.errori, g.finito), (0, 0, false));
-        assert_eq!(g.restante_ms(70_000.0), 60_000.0);
+        assert_eq!(g.restante_ms(70_000.0), 30_000.0);
     }
 
     #[test]

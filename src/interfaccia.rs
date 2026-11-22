@@ -74,7 +74,7 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
     scheda(ui, |ui| {
         let mut azione = Azione::Nessuna;
         ui.label(RichText::new("aimpro").size(28.0).strong());
-        ui.label(RichText::new("Scatto: 60 secondi, una sfera alla volta").color(TENUE));
+        ui.label(RichText::new("Scatto: 30 secondi, una sfera alla volta").color(TENUE));
         ui.add_space(4.0);
         ui.label("Colpisci la sfera: appena la prendi ne compare un'altra in un altro punto. Ogni clic a vuoto è un errore.");
         ui.separator();

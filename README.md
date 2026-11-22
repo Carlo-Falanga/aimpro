@@ -8,7 +8,7 @@ grafica va su DirectX 12 con il vsync spento di default e lo schermo intero escl
 
 ## Il primo scenario
 
-Scatto: 60 secondi, una sfera alla volta in un punto casuale della stanza. Colpita, ne compare un'altra; ogni clic a
+Scatto: 30 secondi, una sfera alla volta in un punto casuale della stanza. Colpita, ne compare un'altra; ogni clic a
 vuoto è un errore. Alla fine il riepilogo con colpi, errori, precisione e tempo medio per bersaglio.
 
 La sensibilità si imposta come in CS2 o in Valorant, con il FOV e i DPI del mouse: i gradi per count sono quelli del
