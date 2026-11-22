@@ -122,27 +122,46 @@ pub fn stile(ctx: &egui::Context) {
     ctx.set_global_style(s);
 }
 
-fn scheda(ui: &mut Ui, contenuto: impl FnOnce(&mut Ui) -> Azione) -> Azione {
-    scheda_larga(ui, 440.0, contenuto)
+fn scheda(ui: &mut Ui, nome: &str, contenuto: impl FnOnce(&mut Ui) -> Azione) -> Azione {
+    scheda_larga(ui, nome, 440.0, contenuto)
 }
 
-fn scheda_larga(ui: &mut Ui, larghezza: f32, contenuto: impl FnOnce(&mut Ui) -> Azione) -> Azione {
+/// Un riquadro centrato. `nome` gli dà un id suo: egui centra l'area con la misura che aveva nel frame prima, e con
+/// un id in comune il primo frame di un riquadro prenderebbe la misura di un altro (la pausa usciva più in alto,
+/// con l'altezza del riepilogo).
+fn scheda_larga(
+    ui: &mut Ui,
+    nome: &str,
+    larghezza: f32,
+    contenuto: impl FnOnce(&mut Ui) -> Azione,
+) -> Azione {
     let mut azione = Azione::Nessuna;
-    // Un id per larghezza: egui centra l'area con la misura del frame prima, e passando dal menu alle statistiche
-    // il primo frame uscirebbe spostato.
-    egui::Area::new(egui::Id::unique(("scheda", larghezza as u32)))
-        .anchor(Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ui.ctx(), |ui| {
-            Frame::new()
-                .fill(Color32::from_rgba_unmultiplied(22, 23, 26, 240))
-                .stroke(Stroke::new(1.0, Color32::from_white_alpha(26)))
-                .corner_radius(CornerRadius::same(14))
-                .inner_margin(Margin::same(28))
-                .show(ui, |ui| {
-                    ui.set_width(larghezza);
-                    azione = contenuto(ui);
-                });
-        });
+    let id = egui::Id::unique(("scheda", nome));
+    let risposta = egui::Area::new(id).anchor(Align2::CENTER_CENTER, [0.0, 0.0]).show(ui.ctx(), |ui| {
+        Frame::new()
+            .fill(Color32::from_rgba_unmultiplied(22, 23, 26, 240))
+            .stroke(Stroke::new(1.0, Color32::from_white_alpha(26)))
+            .corner_radius(CornerRadius::same(14))
+            .inner_margin(Margin::same(28))
+            .show(ui, |ui| {
+                ui.set_width(larghezza);
+                azione = contenuto(ui);
+            });
+    });
+    // Lo stesso riquadro può cambiare altezza (il riepilogo con o senza "Nuovo record", il menu con un avviso):
+    // centrato con la misura vecchia uscirebbe spostato fino al prossimo evento. Se la misura è cambiata, egui rifà
+    // subito il passaggio con quella nuova; non con un clic in mano, che il secondo passaggio non vedrebbe.
+    let misura = risposta.response.rect.size();
+    let chiave = id.with("misura");
+    let prima: Option<egui::Vec2> = ui.ctx().data(|d| d.get_temp(chiave));
+    ui.ctx().data_mut(|d| d.insert_temp(chiave, misura));
+    if prima.is_some_and(|p| (p - misura).length() > 0.5) && azione == Azione::Nessuna {
+        ui.ctx().request_discard("riquadro con un'altra misura");
+        // Già al secondo passaggio egui non ne fa un terzo: allora un frame in più, che parte dalla misura nuova.
+        if !ui.ctx().will_discard() {
+            ui.ctx().request_repaint();
+        }
+    }
     azione
 }
 
@@ -157,7 +176,7 @@ fn pulsante(ui: &mut Ui, testo: &str, principale: bool) -> bool {
 }
 
 pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
-    scheda(ui, |ui| {
+    scheda(ui, "menu", |ui| {
         ui.label(RichText::new("aimpro").size(28.0).strong());
         ui.label(RichText::new("Scatto: 30 secondi, una sfera alla volta").color(TENUE));
         ui.add_space(4.0);
@@ -317,7 +336,7 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
 }
 
 pub fn pausa(ui: &mut Ui, secondi: u32) -> Azione {
-    scheda(ui, |ui| {
+    scheda(ui, "pausa", |ui| {
         let mut azione = Azione::Nessuna;
         ui.label(RichText::new("In pausa").size(22.0).strong());
         ui.label(RichText::new(format!("Restano {secondi} secondi. Il tempo è fermo.")).color(TENUE));
@@ -348,7 +367,7 @@ pub fn testo_confronto(c: &Confronto) -> (String, String, bool) {
 }
 
 pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, confronto: Option<&Confronto>, avviso: Option<&str>) -> Azione {
-    scheda(ui, |ui| {
+    scheda(ui, "riepilogo", |ui| {
         let mut azione = Azione::Nessuna;
         ui.label(RichText::new("Fine del giro").size(22.0).strong());
         if let Some(c) = confronto.filter(|c| c.nuovo_record()) {
@@ -492,7 +511,7 @@ fn riga(ui: &mut Ui, celle: [String; 7], intestazione: bool) {
 
 /// La schermata Statistiche dello scenario scatto: grafico degli ultimi giri con il record, la sessione e l'elenco.
 pub fn statistiche(ui: &mut Ui, s: &Storico, esportato: Option<&str>) -> Azione {
-    scheda_larga(ui, 760.0, |ui| {
+    scheda_larga(ui, "statistiche", 760.0, |ui| {
         let mut azione = Azione::Nessuna;
         ui.label(RichText::new("Statistiche").size(26.0).strong());
         ui.label(RichText::new("Scatto, 30 secondi").color(TENUE));
