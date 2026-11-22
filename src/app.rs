@@ -39,6 +39,8 @@ use crate::tempo;
 use crate::{esporta, giro};
 
 const OCCHIO: DVec3 = DVec3::new(0.0, 1.7, 0.0);
+/// Il lato massimo delle texture di egui, quindi la larghezza dell'atlante dei caratteri.
+const LATO_ATLANTE: usize = 2048;
 /// Il pannello della latenza nel giro si ricalcola 4 volte al secondo.
 const AGGIORNA_PANNELLO_MS: f64 = 250.0;
 
@@ -717,7 +719,12 @@ impl ApplicationHandler for App {
             &finestra,
             Some(finestra.scale_factor() as f32),
             None,
-            self.grafica.as_ref().map(|g| g.device.limits().max_texture_dimension_2d as usize),
+            // egui fa l'atlante dei caratteri largo quanto il lato massimo delle texture: con quello della scheda
+            // (16 384 pixel) sono 16 384 x 32 pixel già al primo frame, in RAM e da caricare in scheda video.
+            // 2048 bastano per i pochi caratteri del menu.
+            self.grafica
+                .as_ref()
+                .map(|g| (g.device.limits().max_texture_dimension_2d as usize).min(LATO_ATLANTE)),
         );
         self.egui_stato = Some(stato);
         if let Some(g) = self.grafica.as_mut() {
