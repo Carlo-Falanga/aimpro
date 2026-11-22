@@ -38,6 +38,103 @@ pub struct InfoMenu<'a> {
     /// La build di questo .exe (`None` per una build locale) e lo stato dell'aggiornamento.
     pub build: Option<u32>,
     pub aggiornamento: &'a StatoAggiornamento,
+    /// Gli Hz dello schermo, arrotondati (0 se Windows non li dice): la voce del limite pari a questi dice "(schermo)".
+    pub hz_schermo: u32,
+}
+
+/// Le voci fisse della tendina del limite di fps, fra "Senza limite" e "Personalizzato…".
+pub const LIMITI_ELENCO: [u32; 6] = [60, 144, 165, 240, 360, 480];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum VoceLimite {
+    Senza,
+    Elenco(u32),
+    Personalizzato,
+}
+
+/// La voce della tendina per un limite (0 = nessun limite). `personalizzato` è la scelta fatta in questa sessione:
+/// chi ha scelto "Personalizzato…" continua a vedere il campo anche se scrive un numero dell'elenco.
+fn voce_limite(limite: u32, personalizzato: bool) -> VoceLimite {
+    if limite == 0 {
+        VoceLimite::Senza
+    } else if !personalizzato && LIMITI_ELENCO.contains(&limite) {
+        VoceLimite::Elenco(limite)
+    } else {
+        VoceLimite::Personalizzato
+    }
+}
+
+/// Il limite che dà una voce; `attuale` è quello di prima, che "Personalizzato…" tiene (240 se non c'era).
+fn valore_voce(voce: VoceLimite, attuale: u32) -> u32 {
+    match voce {
+        VoceLimite::Senza => 0,
+        VoceLimite::Elenco(v) => v,
+        VoceLimite::Personalizzato if attuale == 0 => 240,
+        VoceLimite::Personalizzato => attuale,
+    }
+}
+
+fn nome_voce(voce: VoceLimite, hz_schermo: u32) -> String {
+    match voce {
+        VoceLimite::Senza => "Senza limite".to_string(),
+        VoceLimite::Elenco(v) if v == hz_schermo => format!("{v} fps (schermo)"),
+        VoceLimite::Elenco(v) => format!("{v} fps"),
+        VoceLimite::Personalizzato => "Personalizzato…".to_string(),
+    }
+}
+
+/// Gli Hz di winit (239,96, 59,94) arrotondati, per riconoscere la voce pari allo schermo.
+pub fn hz_intero(hz: f64) -> u32 {
+    if hz > 0.0 { hz.round() as u32 } else { 0 }
+}
+
+/// La tendina del limite di fps e, solo con "Personalizzato…", il campo del numero. Vero se il limite è cambiato.
+fn riga_limite(ui: &mut Ui, c: &mut Config, hz_schermo: u32) -> bool {
+    let id = egui::Id::unique("limite personalizzato");
+    let mut personalizzato = ui.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+    let prima = c.limite_fps;
+    let voce = voce_limite(c.limite_fps, personalizzato);
+    // Un valore fuori elenco (dal config.toml) resta "Personalizzato…" anche se col campo si arriva a uno dell'elenco:
+    // il campo non deve sparire mentre lo si trascina.
+    personalizzato |= voce == VoceLimite::Personalizzato;
+    let mut scelta = voce;
+    let tendina = |ui: &mut Ui, scelta: &mut VoceLimite| {
+        egui::ComboBox::from_id_salt("limite fps")
+            .selected_text(nome_voce(voce, hz_schermo))
+            .width(170.0)
+            .height(400.0)
+            .show_ui(ui, |ui| {
+                let voci = std::iter::once(VoceLimite::Senza)
+                    .chain(LIMITI_ELENCO.map(VoceLimite::Elenco))
+                    .chain(std::iter::once(VoceLimite::Personalizzato));
+                for v in voci {
+                    ui.selectable_value(scelta, v, nome_voce(v, hz_schermo));
+                }
+            });
+    };
+    if voce == VoceLimite::Personalizzato {
+        ui.horizontal_top(|ui| {
+            tendina(ui, &mut scelta);
+            if scelta == voce {
+                ui.add(
+                    egui::DragValue::new(&mut c.limite_fps)
+                        .range(LIMITI_FPS.0..=LIMITI_FPS.1)
+                        .speed(1.0)
+                        .suffix(" fps"),
+                );
+            }
+        });
+    } else {
+        // Senza il campo la tendina va da sola nella cella, allineata come quella della sensibilità.
+        tendina(ui, &mut scelta);
+    }
+    if scelta != voce {
+        // Il campo compare (o sparisce) dal frame dopo: la scelta chiede comunque un ridisegno.
+        personalizzato = scelta == VoceLimite::Personalizzato;
+        c.limite_fps = valore_voce(scelta, c.limite_fps);
+    }
+    ui.data_mut(|d| d.insert_temp(id, personalizzato));
+    c.limite_fps != prima
 }
 
 fn maiuscola(t: &str) -> String {
@@ -253,27 +350,17 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
             }
             ui.end_row();
 
-            ui.label("Limite fps");
-            ui.horizontal(|ui| {
-                let mut attivo = c.limite_fps != 0;
-                if ui.add_enabled(!c.vsync, egui::Checkbox::without_text(&mut attivo)).changed() {
-                    c.limite_fps = if attivo { 240 } else { 0 };
+            if c.vsync {
+                // Col vsync il limite non vale: la riga resta, grigia, e dice perché.
+                // Disegnate come disattivate, cioè più scure delle altre righe.
+                ui.add_enabled(false, egui::Label::new("Limite fps"));
+                ui.add_enabled(false, egui::Label::new("col vsync decide lo schermo"));
+            } else {
+                ui.label("Limite fps");
+                if riga_limite(ui, c, info.hz_schermo) {
                     azione = Azione::Impostazioni;
                 }
-                if attivo
-                    && ui
-                        .add_enabled(
-                            !c.vsync,
-                            egui::DragValue::new(&mut c.limite_fps)
-                                .range(LIMITI_FPS.0..=LIMITI_FPS.1)
-                                .speed(1.0)
-                                .suffix(" fps"),
-                        )
-                        .changed()
-                {
-                    azione = Azione::Impostazioni;
-                }
-            });
+            }
             ui.end_row();
 
             ui.label("Schermo intero");
@@ -657,6 +744,49 @@ mod test {
     fn il_motivo_dell_errore_comincia_con_la_maiuscola() {
         assert_eq!(maiuscola("lo SHA-256 non torna"), "Lo SHA-256 non torna");
         assert_eq!(maiuscola(""), "");
+    }
+
+    #[test]
+    fn il_limite_di_fps_ha_la_sua_voce_nella_tendina() {
+        assert_eq!(voce_limite(0, false), VoceLimite::Senza);
+        assert_eq!(voce_limite(0, true), VoceLimite::Senza);
+        for v in LIMITI_ELENCO {
+            assert_eq!(voce_limite(v, false), VoceLimite::Elenco(v));
+            // Scelto "Personalizzato…" resta personalizzato anche se il numero scritto è in elenco.
+            assert_eq!(voce_limite(v, true), VoceLimite::Personalizzato);
+        }
+        // Un valore fuori dall'elenco (anche da un config.toml scritto a mano) è personalizzato.
+        assert_eq!(voce_limite(200, false), VoceLimite::Personalizzato);
+        assert_eq!(voce_limite(30, false), VoceLimite::Personalizzato);
+        assert_eq!(voce_limite(2000, false), VoceLimite::Personalizzato);
+    }
+
+    #[test]
+    fn ogni_voce_della_tendina_da_il_suo_valore() {
+        assert_eq!(valore_voce(VoceLimite::Senza, 240), 0);
+        for v in LIMITI_ELENCO {
+            assert_eq!(valore_voce(VoceLimite::Elenco(v), 0), v);
+            // Andata e ritorno: la voce scelta è quella che si rivede.
+            assert_eq!(voce_limite(valore_voce(VoceLimite::Elenco(v), 0), false), VoceLimite::Elenco(v));
+        }
+        // Personalizzato tiene il numero che c'era, o parte da 240 se non c'era limite.
+        assert_eq!(valore_voce(VoceLimite::Personalizzato, 144), 144);
+        assert_eq!(valore_voce(VoceLimite::Personalizzato, 0), 240);
+        assert!((LIMITI_FPS.0..=LIMITI_FPS.1).contains(&valore_voce(VoceLimite::Personalizzato, 0)));
+        assert!(LIMITI_ELENCO.iter().all(|v| (LIMITI_FPS.0..=LIMITI_FPS.1).contains(v)));
+    }
+
+    #[test]
+    fn la_voce_pari_agli_hz_dello_schermo_lo_dice() {
+        assert_eq!(nome_voce(VoceLimite::Senza, 240), "Senza limite");
+        assert_eq!(nome_voce(VoceLimite::Elenco(240), 240), "240 fps (schermo)");
+        assert_eq!(nome_voce(VoceLimite::Elenco(144), 240), "144 fps");
+        assert_eq!(nome_voce(VoceLimite::Elenco(144), 144), "144 fps (schermo)");
+        assert_eq!(nome_voce(VoceLimite::Elenco(60), 0), "60 fps");
+        assert_eq!(nome_voce(VoceLimite::Personalizzato, 240), "Personalizzato…");
+        assert_eq!(hz_intero(239.96), 240);
+        assert_eq!(hz_intero(59.94), 60);
+        assert_eq!(hz_intero(0.0), 0);
     }
 
     #[test]

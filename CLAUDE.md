@@ -150,7 +150,7 @@ con la virgola, data `GG/MM/AAAA hh:mm:ss`, UTF-8 con il BOM, righe chiuse da CR
 ```
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # 87 test: sensibilità, impostazioni, visuale, giro, registro, storico, CSV, misure, tempo, aggiornamento
+cargo test                      # 90 test: sensibilità, impostazioni, menu, visuale, giro, registro, storico, CSV, misure, tempo, aggiornamento
 cargo run --release             # il gioco, a schermo intero (Esc pausa, F3 pannello della latenza)
 cargo run --release -- --finestra            # in una finestra normale
 cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce, scrive misure\bench-<ora>.md
