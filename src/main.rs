@@ -12,14 +12,17 @@ mod app;
 mod banco;
 mod camera;
 mod config;
+mod esporta;
 mod giro;
 mod grafica;
 mod ingresso;
 mod interfaccia;
 mod latenza;
 mod misure;
+mod registro;
 mod sensibilita;
 mod sistema;
+mod storico;
 mod tempo;
 
 use std::path::PathBuf;
@@ -65,12 +68,12 @@ fn main() {
     }));
 
     let banco = col_banco.then(|| {
-        // Al più 50 s per fase: il giro dura 60 s e finirebbe dentro la fase.
+        // Al più 25 s per fase: il giro dura 30 s e finirebbe dentro la fase.
         let secondi = argomento("--secondi")
             .and_then(|s| s.parse::<f64>().ok())
             .filter(|s| s.is_finite())
             .unwrap_or(15.0)
-            .clamp(1.0, 50.0);
+            .clamp(1.0, 25.0);
         let uscita = argomento("--uscita").map(PathBuf::from).unwrap_or_else(|| {
             let istante =
                 std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
