@@ -4,6 +4,7 @@
 
 use egui::{Align2, Color32, CornerRadius, FontId, Frame, Margin, Pos2, RichText, Sense, Shape, Stroke, Ui};
 
+use crate::aggiornamento::Stato as StatoAggiornamento;
 use crate::config::{Config, LIMITI_DPI, LIMITI_FOV, LIMITI_FPS, LIMITI_SENSIBILITA};
 use crate::giro::Riepilogo;
 use crate::sensibilita::{Gioco, cm_per_360, converti, gradi_per_count};
@@ -11,6 +12,7 @@ use crate::storico::{Confronto, GiroSalvato, SCATTO, Storico};
 
 pub const ACCENTO: Color32 = Color32::from_rgb(255, 176, 33);
 const TENUE: Color32 = Color32::from_rgb(161, 163, 169);
+const AVVISO: Color32 = Color32::from_rgb(255, 210, 122);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Azione {
@@ -21,6 +23,8 @@ pub enum Azione {
     TornaAlMenu,
     Statistiche,
     EsportaCsv,
+    /// "Aggiorna e riavvia" (o "Riprova" dopo un errore).
+    Aggiorna,
     /// Le impostazioni sono cambiate: si salvano e si applicano.
     Impostazioni,
     Chiudi,
@@ -31,6 +35,80 @@ pub struct InfoMenu<'a> {
     pub scheda: &'a str,
     pub presentazione: &'a str,
     pub avviso: Option<&'a str>,
+    /// La build di questo .exe (`None` per una build locale) e lo stato dell'aggiornamento.
+    pub build: Option<u32>,
+    pub aggiornamento: &'a StatoAggiornamento,
+}
+
+fn maiuscola(t: &str) -> String {
+    let mut c = t.chars();
+    c.next().map_or(String::new(), |p| p.to_uppercase().chain(c).collect())
+}
+
+/// Il riquadro dell'aggiornamento in cima al menu; niente se non c'è niente da dire.
+fn aggiornamento(ui: &mut Ui, build: Option<u32>, stato: &StatoAggiornamento) -> Azione {
+    let tua = build.map_or("una build locale".to_string(), |b| format!("la build {b}"));
+    let (titolo, riga, colore, pulsante_attivo, testo_pulsante) = match stato {
+        StatoAggiornamento::Nessuno => return Azione::Nessuna,
+        StatoAggiornamento::Disponibile(r) => (
+            "Aggiornamento disponibile".to_string(),
+            format!("È uscita la build {}: hai {tua}.", r.build),
+            TENUE,
+            true,
+            "Aggiorna e riavvia",
+        ),
+        StatoAggiornamento::Scarico { release, scaricati, totali } => (
+            format!("Scarico la build {}", release.build),
+            match totali {
+                Some(t) if *t > 0 => format!(
+                    "{:.1} MB su {:.1} ({}%). aimpro si riavvia da solo alla fine.",
+                    *scaricati as f64 / 1e6,
+                    *t as f64 / 1e6,
+                    scaricati * 100 / t
+                ),
+                _ => format!("{:.1} MB. aimpro si riavvia da solo alla fine.", *scaricati as f64 / 1e6),
+            },
+            TENUE,
+            false,
+            "Aggiorna e riavvia",
+        ),
+        StatoAggiornamento::Pronto(r) => (
+            format!("Build {} pronta", r.build),
+            "Riavvio aimpro.".to_string(),
+            TENUE,
+            false,
+            "Aggiorna e riavvia",
+        ),
+        StatoAggiornamento::NonRiparte { release, motivo } => (
+            format!("Build {} installata", release.build),
+            format!(
+                "Non è ripartita da sola ({}): chiudi aimpro e riaprilo.",
+                motivo.trim_end().trim_end_matches('.')
+            ),
+            AVVISO,
+            false,
+            "Aggiorna e riavvia",
+        ),
+        StatoAggiornamento::Errore { release, motivo } => (
+            "Aggiornamento non riuscito".to_string(),
+            format!(
+                "{}. Resta {tua}: puoi riprovare, o scaricare la build {} dalla pagina delle release.",
+                maiuscola(motivo.trim_end().trim_end_matches('.')),
+                release.build
+            ),
+            AVVISO,
+            true,
+            "Riprova",
+        ),
+    };
+    let mut azione = Azione::Nessuna;
+    ui.label(RichText::new(titolo).size(15.0).strong());
+    ui.label(RichText::new(riga).color(colore).size(13.0));
+    if ui.add_enabled_ui(pulsante_attivo, |ui| pulsante(ui, testo_pulsante, false)).inner {
+        azione = Azione::Aggiorna;
+    }
+    ui.separator();
+    azione
 }
 
 pub fn stile(ctx: &egui::Context) {
@@ -80,12 +158,15 @@ fn pulsante(ui: &mut Ui, testo: &str, principale: bool) -> bool {
 
 pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
     scheda(ui, |ui| {
-        let mut azione = Azione::Nessuna;
         ui.label(RichText::new("aimpro").size(28.0).strong());
         ui.label(RichText::new("Scatto: 30 secondi, una sfera alla volta").color(TENUE));
         ui.add_space(4.0);
         ui.label("Colpisci la sfera: appena la prendi ne compare un'altra in un altro punto. Ogni clic a vuoto è un errore.");
         ui.separator();
+        let mut azione = aggiornamento(ui, info.build, info.aggiornamento);
+        // Mentre si scarica o si riavvia non si gioca: la rete non lavora durante il giro.
+        let si_gioca =
+            !matches!(info.aggiornamento, StatoAggiornamento::Scarico { .. } | StatoAggiornamento::Pronto(_));
 
         egui::Grid::new("impostazioni").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
             ui.label("Sensibilità di");
@@ -181,6 +262,12 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
                 azione = Azione::Impostazioni;
             }
             ui.end_row();
+
+            ui.label("Aggiornamenti");
+            if ui.checkbox(&mut c.controlla_aggiornamenti, "controlla all'avvio").changed() {
+                azione = Azione::Impostazioni;
+            }
+            ui.end_row();
         });
 
         ui.add_space(2.0);
@@ -195,10 +282,10 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
             .size(13.0),
         );
         if let Some(a) = info.avviso {
-            ui.label(RichText::new(a).color(Color32::from_rgb(255, 210, 122)).size(13.0));
+            ui.label(RichText::new(a).color(AVVISO).size(13.0));
         }
         ui.add_space(6.0);
-        if pulsante(ui, "Inizia", true) {
+        if ui.add_enabled_ui(si_gioca, |ui| pulsante(ui, "Inizia", true)).inner {
             azione = Azione::Inizia;
         }
         if pulsante(ui, "Statistiche", false) {
@@ -213,7 +300,8 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
         );
         ui.label(
             RichText::new(format!(
-                "{} · {}",
+                "{} · {} · {}",
+                info.build.map_or("build locale".to_string(), |b| format!("build {b}")),
                 info.scheda,
                 match info.presentazione {
                     "Immediate" | "Mailbox" => "vsync spento",
@@ -293,7 +381,7 @@ pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, confronto: Option<&Confronto>, avvi
             }
         });
         if let Some(a) = avviso {
-            ui.label(RichText::new(a).color(Color32::from_rgb(255, 210, 122)).size(13.0));
+            ui.label(RichText::new(a).color(AVVISO).size(13.0));
         }
         ui.add_space(8.0);
         if pulsante(ui, "Rigioca", true) {
@@ -544,6 +632,12 @@ mod test {
         assert_eq!(testo_confronto(&c(25, Some(30))), s("30 colpi", "-5 colpi", false));
         assert_eq!(testo_confronto(&c(30, Some(30))), s("30 colpi", "pari al record", false));
         assert_eq!(testo_confronto(&c(12, None)), s("nessuno prima di questo giro", "primo giro", true));
+    }
+
+    #[test]
+    fn il_motivo_dell_errore_comincia_con_la_maiuscola() {
+        assert_eq!(maiuscola("lo SHA-256 non torna"), "Lo SHA-256 non torna");
+        assert_eq!(maiuscola(""), "");
     }
 
     #[test]

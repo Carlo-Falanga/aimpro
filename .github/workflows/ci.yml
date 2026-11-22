@@ -20,6 +20,9 @@ jobs:
     runs-on: windows-latest
     env:
       CARGO_TERM_COLOR: always
+      # Il numero di build dentro l'.exe (src/aggiornamento.rs, option_env!): è lo stesso del tag
+      # v<versione>-build.<run_number> che pubblica il job release, così l'app sa se la release è più nuova.
+      AIMPRO_BUILD: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
 
