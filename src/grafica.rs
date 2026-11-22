@@ -126,6 +126,7 @@ pub fn scegli_presentazione(modi: &[wgpu::PresentMode], vsync: bool) -> wgpu::Pr
 
 impl Grafica {
     pub fn new(finestra: Arc<Window>, vsync: bool) -> Result<Self, String> {
+        crate::sistema::segna_memoria("finestra creata");
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::DX12;
         let istanza = wgpu::Instance::new(desc);
@@ -138,12 +139,14 @@ impl Grafica {
             apply_limit_buckets: false,
         }))
         .map_err(|e| format!("nessuna scheda video DirectX 12: {e}"))?;
+        crate::sistema::segna_memoria("istanza DirectX 12 e scheda video");
         let (device, queue) = pollster::block_on(scheda.request_device(&wgpu::DeviceDescriptor {
             label: Some("aimpro"),
             required_limits: wgpu::Limits::downlevel_defaults().using_resolution(scheda.limits()),
             ..Default::default()
         }))
         .map_err(|e| format!("dispositivo: {e}"))?;
+        crate::sistema::segna_memoria("dispositivo DirectX 12");
 
         let capacita = surface.get_capabilities(&scheda);
         // Formato non sRGB: i colori degli shader e di egui sono già in gamma.
@@ -166,6 +169,7 @@ impl Grafica {
             view_formats: vec![],
         };
         surface.configure(&device, &config);
+        crate::sistema::segna_memoria("swapchain");
 
         let modulo = device.create_shader_module(wgpu::include_wgsl!("scena.wgsl"));
         let layout_gruppo = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -254,6 +258,7 @@ impl Grafica {
             premoltiplicato,
         );
 
+        crate::sistema::segna_memoria("shader e pipeline");
         let dati_stanza = stanza();
         let b_stanza = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("stanza"),
@@ -271,6 +276,7 @@ impl Grafica {
             formato,
             egui_wgpu::RendererOptions { dithering: false, ..Default::default() },
         );
+        crate::sistema::segna_memoria("buffer e renderer di egui");
 
         Ok(Grafica {
             surface,

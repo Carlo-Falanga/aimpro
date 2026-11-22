@@ -59,6 +59,7 @@ fn argomento(nome: &str) -> Option<String> {
 }
 
 fn main() {
+    sistema::segna_memoria("avvio");
     let _ = log::set_logger(&REGISTRO).map(|()| log::set_max_level(log::LevelFilter::Warn));
     let col_banco = std::env::args().any(|a| a == "--bench");
     // Un panic finisce in errore.txt e in una finestra di messaggio: senza console non lo vedrebbe nessuno.
@@ -92,7 +93,9 @@ fn main() {
     // Il mouse lo legge il thread del Raw Input: winit non deve registrarsi per gli stessi eventi (la
     // registrazione è una sola per processo).
     event_loop.listen_device_events(DeviceEvents::Never);
+    sistema::segna_memoria("ciclo degli eventi creato");
     let mut app = app::App::new(banco);
+    sistema::segna_memoria("programma pronto (impostazioni, misure, thread del mouse)");
     if let Err(e) = event_loop.run_app(&mut app) {
         sistema::errore_fatale(&format!("il ciclo degli eventi si è fermato: {e}"), col_banco);
     }

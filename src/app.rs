@@ -468,6 +468,8 @@ impl App {
         // Il pannello si prepara qui, dopo il present: si vedrà nel frame dopo, e il suo costo non sta fra la
         // lettura del mouse e lo schermo.
         self.prepara_pannello_giro(presentato);
+        static PRIMO_GIRO: std::sync::Once = std::sync::Once::new();
+        PRIMO_GIRO.call_once(|| sistema::segna_memoria("primo frame del giro"));
         if finito {
             self.fine_giro();
         }
@@ -595,6 +597,9 @@ impl App {
                     Some(StratoEgui { primitive: &primitive, schermo: &schermo, nuove: true }),
                 );
                 self.frame_disegnati += 1;
+                static PRIMO_MENU: std::sync::Once = std::sync::Once::new();
+                PRIMO_MENU
+                    .call_once(|| sistema::segna_memoria("primo frame del menu (caratteri e testo di egui)"));
             }
             libera_texture(g, &mut uscita.textures_delta);
         }
