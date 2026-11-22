@@ -7,6 +7,7 @@
 // In release niente finestra della console.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod aggiornamento;
 mod allocazioni;
 mod app;
 mod banco;
@@ -20,6 +21,7 @@ mod interfaccia;
 mod latenza;
 mod misure;
 mod registro;
+mod rete;
 mod sensibilita;
 mod sistema;
 mod storico;
@@ -83,6 +85,14 @@ fn main() {
         banco::Banco::new(uscita, secondi)
     });
 
+    // Il .vecchio lasciato da un aggiornamento: il processo di prima può essere ancora in chiusura, quindi in un
+    // thread che riprova per qualche secondo, fuori dall'avvio.
+    if let Ok(exe) = std::env::current_exe()
+        && aggiornamento::percorso_vecchio(&exe).exists()
+    {
+        std::thread::spawn(move || aggiornamento::pulisci_vecchio(&exe, 40));
+    }
+
     let event_loop = match EventLoop::new() {
         Ok(el) => el,
         Err(e) => {
@@ -94,11 +104,12 @@ fn main() {
     // registrazione è una sola per processo).
     event_loop.listen_device_events(DeviceEvents::Never);
     sistema::segna_memoria("ciclo degli eventi creato");
-    let mut app = app::App::new(banco);
+    let mut app = app::App::new(banco, event_loop.create_proxy());
     sistema::segna_memoria("programma pronto (impostazioni, misure, thread del mouse)");
     if let Err(e) = event_loop.run_app(&mut app) {
         sistema::errore_fatale(&format!("il ciclo degli eventi si è fermato: {e}"), col_banco);
     }
+    aggiornamento::aspetta_sostituzione();
     if sistema::ERRORE_FATALE.load(std::sync::atomic::Ordering::SeqCst) {
         std::process::exit(1);
     }

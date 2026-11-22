@@ -18,11 +18,12 @@ use std::time::{Duration, Instant};
 use glam::DVec3;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
+use crate::aggiornamento::{self, Aggiornamento};
 use crate::banco::Banco;
 use crate::camera;
 use crate::config::{self, Config};
@@ -116,6 +117,8 @@ pub struct App {
     pub alloc_nostre: u64,
     pub hz_schermo: f64,
     pub banco: Option<Banco>,
+    /// Il controllo degli aggiornamenti e il download, nel loro thread; il menu ne mostra lo stato.
+    aggiornamento: Arc<Aggiornamento>,
 }
 
 /// Carica in scheda video le texture nuove o cambiate di egui.
@@ -144,9 +147,16 @@ fn modo_migliore(monitor: &MonitorHandle) -> Option<VideoModeHandle> {
 }
 
 impl App {
-    pub fn new(banco: Option<Banco>) -> Self {
+    pub fn new(banco: Option<Banco>, proxy: EventLoopProxy<()>) -> Self {
         let percorso_config = config::percorso_predefinito();
         let (config, avviso) = config::carica(&percorso_config);
+        // Il banco non va in rete: niente che si mescoli alle sue misure. Il thread sveglia il menu con un evento.
+        let aggiornamento = Aggiornamento::avvia(
+            banco.is_none() && config.controlla_aggiornamenti,
+            Box::new(move || {
+                let _ = proxy.send_event(());
+            }),
+        );
         let egui_ctx = egui::Context::default();
         interfaccia::stile(&egui_ctx);
         // La sessione parte adesso, anche se i file dello storico finiscono di leggersi dopo.
@@ -195,6 +205,7 @@ impl App {
             alloc_nostre: 0,
             hz_schermo: 0.0,
             banco,
+            aggiornamento,
         };
         app.applica_config();
         app
@@ -255,6 +266,8 @@ impl App {
 
     /// Nel giro il cursore di Windows è nascosto e fermo al centro della finestra; fuori è libero.
     fn cursore_di_gioco(&self, gioco: bool) {
+        // Entra ed esce dal giro sempre da qui: la rete dell'aggiornamento si ferma finché si gioca.
+        aggiornamento::nel_giro(gioco);
         if let Some(f) = &self.finestra {
             f.set_cursor_visible(!gioco);
             let _ = f.set_cursor_grab(if gioco { CursorGrabMode::Confined } else { CursorGrabMode::None });
@@ -560,13 +573,20 @@ impl App {
         } else {
             None
         };
+        let stato_aggiornamento = self.aggiornamento.stato();
         let mut azione = Azione::Nessuna;
         let mut uscita = self.egui_ctx.run_ui(input, |ui| {
             azione = match stato_ora {
                 Stato::Menu => interfaccia::menu(
                     ui,
                     &mut cfg,
-                    &InfoMenu { scheda: &scheda, presentazione: &presentazione, avviso: avviso.as_deref() },
+                    &InfoMenu {
+                        scheda: &scheda,
+                        presentazione: &presentazione,
+                        avviso: avviso.as_deref(),
+                        build: self.aggiornamento.attuale(),
+                        aggiornamento: &stato_aggiornamento,
+                    },
                 ),
                 Stato::Pausa => interfaccia::pausa(ui, restanti),
                 Stato::Riepilogo(r) => {
@@ -649,8 +669,14 @@ impl App {
                 self.esporta_csv();
                 self.ridisegna();
             }
+            Azione::Aggiorna => {
+                self.salva_se_serve();
+                self.aggiornamento.scarica_e_sostituisci();
+                self.ridisegna();
+            }
             Azione::Chiudi => {
                 self.salva_se_serve();
+                aggiornamento::aspetta_sostituzione();
                 std::process::exit(0)
             }
         }
@@ -673,6 +699,19 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    /// Il thread dell'aggiornamento ha cambiato stato: si ridisegna il menu; a .exe nuovo pronto, si salva, lo si
+    /// avvia e si esce.
+    fn user_event(&mut self, _el: &ActiveEventLoop, _evento: ()) {
+        if matches!(self.aggiornamento.stato(), aggiornamento::Stato::Pronto(_)) && self.stato != Stato::Giro
+        {
+            self.salva_se_serve();
+            if self.aggiornamento.riavvia().is_ok() {
+                std::process::exit(0);
+            }
+        }
+        self.ridisegna();
+    }
+
     fn resumed(&mut self, el: &ActiveEventLoop) {
         if self.finestra.is_some() {
             return;

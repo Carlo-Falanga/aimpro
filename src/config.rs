@@ -29,6 +29,9 @@ pub struct Config {
     pub limite_fps: u32,
     /// Schermo intero esclusivo (cambia modalità video); altrimenti finestra senza bordi a tutto schermo.
     pub schermo_intero_esclusivo: bool,
+    /// All'avvio chiede a GitHub se c'è una build più nuova (acceso di base; un file vecchio senza il campo lo
+    /// prende acceso).
+    pub controlla_aggiornamenti: bool,
 }
 
 impl Default for Config {
@@ -51,6 +54,7 @@ impl Config {
             vsync: false,
             limite_fps: 0,
             schermo_intero_esclusivo: true,
+            controlla_aggiornamenti: true,
         }
     }
 
@@ -143,6 +147,7 @@ mod test {
             vsync: true,
             limite_fps: 240,
             schermo_intero_esclusivo: false,
+            controlla_aggiornamenti: false,
         };
         salva(&p, &c).unwrap();
         assert_eq!(carica(&p), (c, None));
@@ -179,6 +184,7 @@ mod test {
             vsync: false,
             limite_fps: 5,
             schermo_intero_esclusivo: true,
+            controlla_aggiornamenti: true,
         }
         .normalizzata();
         assert_eq!(c.sensibilita, 0.4);
@@ -206,6 +212,34 @@ mod test {
         assert_eq!(c.gioco, Gioco::Valorant);
         assert_eq!(c.sensibilita, Gioco::Valorant.sensibilita_predefinita());
         assert_eq!(c.fov, Gioco::Valorant.fov_predefinito());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn un_file_di_prima_senza_il_campo_controlla_gli_aggiornamenti() {
+        let d = cartella_di_prova("senza-aggiornamenti");
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("config.toml");
+        std::fs::write(
+            &p,
+            "gioco = \"cs2\"
+sensibilita = 1.25
+vsync = false
+schermo_intero_esclusivo = true
+",
+        )
+        .unwrap();
+        let (c, avviso) = carica(&p);
+        assert_eq!(avviso, None);
+        assert!(c.controlla_aggiornamenti);
+        assert!(Config::default().controlla_aggiornamenti, "acceso di base");
+        std::fs::write(
+            &p,
+            "controlla_aggiornamenti = false
+",
+        )
+        .unwrap();
+        assert!(!carica(&p).0.controlla_aggiornamenti);
         let _ = std::fs::remove_dir_all(&d);
     }
 
