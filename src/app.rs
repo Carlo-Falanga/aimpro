@@ -586,6 +586,7 @@ impl App {
                         avviso: avviso.as_deref(),
                         build: self.aggiornamento.attuale(),
                         aggiornamento: &stato_aggiornamento,
+                        hz_schermo: interfaccia::hz_intero(self.hz_schermo),
                     },
                 ),
                 Stato::Pausa => interfaccia::pausa(ui, restanti),
