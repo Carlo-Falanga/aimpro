@@ -26,8 +26,10 @@ pub struct Latenza {
     pub count_present_vecchio: Anello<CAPACITA>,
     pub count_present_recente: Anello<CAPACITA>,
     pub clic_present: Anello<4096>,
-    pub attesa: Anello<CAPACITA>,
-    pub lavoro: Anello<CAPACITA>,
+    /// Attesa e lavoro li mostra solo il pannello F3, sugli ultimi `CAMPIONI_PANNELLO`: anelli più corti, 1 MB in
+    /// meno.
+    pub attesa: Anello<CAMPIONI_PANNELLO>,
+    pub lavoro: Anello<CAMPIONI_PANNELLO>,
     ultimo_inizio: i64,
     /// Cresce a ogni azzeramento: con il numero di frame dice se le misure sono cambiate.
     generazione: u64,
