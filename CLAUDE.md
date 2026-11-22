@@ -217,9 +217,9 @@ Da dove viene la memoria (tappe dell'avvio nel file del banco, set di lavoro pri
 | tappa | prima | dopo | perché |
 |---|---|---|---|
 | programma pronto | 4,2 MB | 3,2 MB | gli anelli di attesa e lavoro del frame sono lunghi quanto il pannello F3 (4096 campioni, non 65 536) |
-| istanza DirectX 12 e scheda video | +22,2 MB | +20,2 MB | i driver: wgpu apre un dispositivo DX12 su ogni scheda (qui anche la Radeon integrata) per sceglierne una; non si evita da wgpu |
+| istanza DirectX 12 e scheda video | +22,2 MB | +20,2 MB | i driver: wgpu apre un dispositivo DX12 su ogni scheda (qui anche la Radeon integrata) per sceglierne una; non si evita da wgpu. I 2 MB in meno non vengono da una modifica: con lo stesso codice di prima questa tappa ha dato +20,6 MB in un altro giro dello stesso giorno (25,7 MB invece di 27,3 alla fine della tappa), quindi è la variazione da un avvio all'altro |
 | dispositivo DirectX 12 | +82,2 MB | +21,8 MB | con `MemoryHints::Performance` wgpu crea subito un blocco di memoria visibile alla CPU da 64 MB: con `MemoryUsage` i blocchi partono da 4 MB (-60 MB). L'heap dei descrittori era da 1 000 000 di voci, ora 16 384: -31 MB di memoria impegnata, il set di lavoro non cambia |
-| swapchain, pipeline, egui | +3,9 MB | +1,9 MB | la differenza non l'ho attribuita a una modifica sola |
+| swapchain, pipeline, egui | +3,9 MB | +1,9 MB | nessuna modifica qui: con lo stesso codice di prima, in un altro giro dello stesso giorno, la tappa ha dato +1,9 MB, come dopo; i 2 MB sono la variazione da un avvio all'altro |
 | primo frame del giro e del menu | +10,9 MB | +9,4 MB | l'atlante dei caratteri di egui era largo quanto il lato massimo delle texture (16 384 pixel), ora 2048 (-1,5 MB) |
 
 Dove va la CPU col limite di fps: il lavoro del frame è circa 0,19 ms (5% di un core a 240 fps); il resto è
