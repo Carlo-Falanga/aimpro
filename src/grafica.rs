@@ -132,6 +132,11 @@ impl Grafica {
         crate::sistema::segna_memoria("finestra creata");
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
         desc.backends = wgpu::Backends::DX12;
+        // Le etichette servono solo agli strumenti di debug della scheda video: nella release non si passano a
+        // DirectX (wgpu le copierebbe a ogni encoder e render pass).
+        if !cfg!(debug_assertions) {
+            desc.flags |= wgpu::InstanceFlags::DISCARD_HAL_LABELS;
+        }
         let istanza = wgpu::Instance::new(desc);
         let dimensioni = finestra.inner_size();
         let surface = istanza.create_surface(finestra).map_err(|e| format!("superficie: {e}"))?;
@@ -361,8 +366,7 @@ impl Grafica {
         strato: Option<StratoEgui>,
     ) {
         let vista = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder =
-            self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("frame") });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         if let Some(s) = scena {
             let (secondi, frazione) = s.tempo.unwrap_or((0, 0.0));
@@ -395,7 +399,7 @@ impl Grafica {
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("scena"),
+                label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &vista,
                     resolve_target: None,
