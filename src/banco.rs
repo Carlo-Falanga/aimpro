@@ -1,7 +1,7 @@
 //! Il banco di prova (`aimpro --bench`): gira da solo, misura ed esce.
 //!
 //! Fasi: menu fermo, menu col mouse che si muove, giro con vsync spento, giro con vsync acceso, giro con il limite
-//! di fps alla frequenza dello schermo e al doppio, giro col pannello F3, riepilogo, pausa, finestra ridotta a
+//! di fps alla frequenza dello schermo e al doppio, giro col pannello F3, giro negli altri cinque scenari, riepilogo, pausa, finestra ridotta a
 //! icona. Gira senza clic di chi guarda: chiede da sé il primo piano.
 //!
 //! Nelle fasi di giro un thread simula il mouse con `SendInput` (movimento ogni millisecondo, un clic ogni
@@ -38,6 +38,8 @@ enum Tipo {
         vsync: bool,
         limite_per_hz: f64,
         pannello: bool,
+        /// L'id dello scenario del giro.
+        scenario: &'static str,
     },
     Riepilogo,
     Pausa,
@@ -117,34 +119,60 @@ impl Banco {
         let fasi = vec![
             Fase {
                 nome: "riscaldamento",
-                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false },
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false, scenario: "scatto" },
                 secondi: 3.0,
             },
             Fase { nome: "menu fermo", tipo: Tipo::Menu, secondi: 8.0 },
             Fase { nome: "menu, mouse in movimento", tipo: Tipo::MenuMouse, secondi: 5.0 },
             Fase {
                 nome: "giro, vsync spento",
-                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false },
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false, scenario: "scatto" },
                 secondi: g,
             },
             Fase {
                 nome: "giro, vsync acceso",
-                tipo: Tipo::Giro { vsync: true, limite_per_hz: 0.0, pannello: false },
+                tipo: Tipo::Giro { vsync: true, limite_per_hz: 0.0, pannello: false, scenario: "scatto" },
                 secondi: g,
             },
             Fase {
                 nome: "giro, vsync spento, limite = Hz schermo",
-                tipo: Tipo::Giro { vsync: false, limite_per_hz: 1.0, pannello: false },
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 1.0, pannello: false, scenario: "scatto" },
                 secondi: g,
             },
             Fase {
                 nome: "giro, vsync spento, limite = 2 x Hz schermo",
-                tipo: Tipo::Giro { vsync: false, limite_per_hz: 2.0, pannello: false },
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 2.0, pannello: false, scenario: "scatto" },
                 secondi: g,
             },
             Fase {
                 nome: "giro, vsync spento, pannello F3 aperto",
-                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: true },
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: true, scenario: "scatto" },
+                secondi: g,
+            },
+            // Gli altri scenari, a vsync spento senza limite: più sfere, moto, tracking.
+            Fase {
+                nome: "giro, vsync spento, scenario deriva",
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false, scenario: "deriva" },
+                secondi: g,
+            },
+            Fase {
+                nome: "giro, vsync spento, scenario filo",
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false, scenario: "filo" },
+                secondi: g,
+            },
+            Fase {
+                nome: "giro, vsync spento, scenario guizzo",
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false, scenario: "guizzo" },
+                secondi: g,
+            },
+            Fase {
+                nome: "giro, vsync spento, scenario terna",
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false, scenario: "terna" },
+                secondi: g,
+            },
+            Fase {
+                nome: "giro, vsync spento, scenario sciame",
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false, scenario: "sciame" },
                 secondi: g,
             },
             Fase { nome: "riepilogo fermo", tipo: Tipo::Riepilogo, secondi: 5.0 },
@@ -284,11 +312,14 @@ impl Banco {
                     self.inietta.store(true, Ordering::Release);
                 }
             }
-            Tipo::Giro { vsync, limite_per_hz, pannello } => {
+            Tipo::Giro { vsync, limite_per_hz, pannello, scenario } => {
                 app.mostra_pannello(pannello);
                 let limite = (app.hz_schermo * limite_per_hz).round() as u32;
                 app.imposta_vsync_e_limite(vsync, limite);
+                app.scegli_scenario(scenario);
                 app.inizia_giro();
+                // Il conto alla rovescia non si misura: il giro parte subito.
+                app.salta_conto();
                 self.clic.store(true, Ordering::Release);
                 self.inietta.store(true, Ordering::Release);
             }
@@ -299,7 +330,9 @@ impl Banco {
             }
             Tipo::Pausa => {
                 app.imposta_vsync_e_limite(false, 0);
+                app.scegli_scenario("scatto");
                 app.inizia_giro();
+                app.salta_conto();
                 app.pausa();
             }
             Tipo::Icona => {
@@ -427,7 +460,7 @@ impl Banco {
             }
         };
         match f.tipo {
-            Tipo::Giro { vsync, limite_per_hz, pannello } => {
+            Tipo::Giro { vsync, limite_per_hz, pannello, scenario } => {
                 if app.stato != Stato::Giro {
                     Some(format!("a fine fase lo stato era {:?}, non il giro", app.stato))
                 } else if !sistema::in_primo_piano(hwnd) {
@@ -438,6 +471,8 @@ impl Banco {
                     Some("la presentazione non era quella della fase".into())
                 } else if app.config.limite_fps != (app.hz_schermo * limite_per_hz).round() as u32 {
                     Some("il limite di fps non era quello della fase".into())
+                } else if app.scenario().id != scenario {
+                    Some(format!("lo scenario era {}, non {scenario}", app.scenario().id))
                 } else if app.pannello_visibile != pannello {
                     Some("il pannello F3 non era come la fase lo chiede".into())
                 } else if frame == 0 || campioni == 0 {

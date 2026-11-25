@@ -11,10 +11,12 @@ use serde::{Deserialize, Serialize};
 use crate::config::Config;
 use crate::giro::Riepilogo;
 use crate::registro::{Bersaglio, Registro};
+use crate::scenari::Parametri;
 use crate::sensibilita::{Gioco, cm_per_360};
 
-/// Versione del formato dei file dello storico.
-pub const FORMATO: u32 = 1;
+/// Versione del formato dei file dello storico. Il 2 aggiunge punteggio, tracking e parametri; i file del formato 1
+/// si leggono ancora (punteggio = colpi, parametri standard).
+pub const FORMATO: u32 = 2;
 /// L'id dello scenario scatto, come sta nei file.
 pub const SCATTO: &str = "scatto";
 
@@ -66,7 +68,16 @@ pub struct GiroSalvato {
     pub tempo_medio_ms: Option<f64>,
     /// Tutti gli overshoot del giro, anche sul bersaglio rimasto in campo.
     pub overshoot: u32,
+    /// Il punteggio: i colpi, o la percentuale del tracking (0-100). Manca nei file del formato 1: sono i colpi.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub punteggio: Option<f64>,
+    /// Negli scenari di tracking, la frazione del giro con il mirino sulla sfera e il tasto premuto (0-1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking: Option<f64>,
     pub impostazioni: Impostazioni,
+    /// Dimensione e velocità dei bersagli scelte nel menu; mancano nei file del formato 1 (standard).
+    #[serde(default)]
+    pub parametri: Parametri,
     /// I bersagli colpiti, in ordine. In memoria lo storico non li tiene (servono solo nel file).
     #[serde(default)]
     pub bersagli: Vec<Bersaglio>,
@@ -120,12 +131,14 @@ pub fn istante_ms() -> i64 {
 }
 
 impl GiroSalvato {
+    #[allow(clippy::too_many_arguments)]
     pub fn nuovo(
         scenario: &str,
         durata_s: f64,
         r: &Riepilogo,
         reg: &Registro,
         c: &Config,
+        parametri: Parametri,
         ora: Ora,
         istante_ms: i64,
     ) -> Self {
@@ -140,36 +153,59 @@ impl GiroSalvato {
             precisione: r.precisione,
             tempo_medio_ms: r.tempo_medio_ms,
             overshoot: reg.overshoot_totale(),
+            punteggio: Some(r.punteggio()),
+            tracking: r.tracking,
             impostazioni: Impostazioni::da_config(c),
+            parametri,
             bersagli: reg.bersagli().to_vec(),
         }
+    }
+
+    /// I colpi, o la percentuale del tracking.
+    pub fn punteggio(&self) -> f64 {
+        self.punteggio.unwrap_or(f64::from(self.colpi))
+    }
+
+    /// Giocato coi parametri dello scenario: solo questi fanno record e grafico.
+    pub fn standard(&self) -> bool {
+        self.parametri.standard()
     }
 }
 
 /// Come è andato il giro rispetto al record dello scenario di prima.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Confronto {
-    pub colpi: u32,
-    /// Il record prima di questo giro; `None` se è il primo giro dello scenario.
-    pub record_prima: Option<u32>,
+    pub punteggio: f64,
+    /// Il record prima di questo giro; `None` se è il primo giro (con parametri standard) dello scenario.
+    pub record_prima: Option<f64>,
+    /// Il giro è coi parametri standard: solo allora può essere un record.
+    pub standard: bool,
 }
 
 impl Confronto {
-    /// Più colpi del record di prima; il primo giro di uno scenario è record se ha almeno un colpo.
+    /// Più del record di prima; il primo giro di uno scenario è record se ha un punteggio. Con i parametri cambiati
+    /// mai.
     pub fn nuovo_record(&self) -> bool {
-        self.record_prima.map_or(self.colpi > 0, |r| self.colpi > r)
+        self.standard && self.record_prima.map_or(self.punteggio > 0.0, |r| self.punteggio > r + 1e-9)
     }
 
-    pub fn differenza(&self) -> Option<i64> {
-        self.record_prima.map(|r| i64::from(self.colpi) - i64::from(r))
+    pub fn differenza(&self) -> Option<f64> {
+        self.record_prima.map(|r| self.punteggio - r)
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sessione {
+    /// I giri coi parametri standard da quando è partito aimpro.
     pub giri: usize,
-    pub media_colpi: Option<f64>,
-    pub migliore: Option<u32>,
+    pub media: Option<f64>,
+    pub migliore: Option<f64>,
+    /// I giri coi parametri cambiati da quando è partito aimpro (non entrano in media e migliore).
+    pub cambiati: usize,
+}
+
+fn massimo(v: impl Iterator<Item = f64>) -> Option<f64> {
+    v.fold(None, |m, x| Some(m.map_or(x, |m: f64| m.max(x))))
 }
 
 pub struct Storico {
@@ -191,7 +227,7 @@ pub fn cartella_predefinita() -> PathBuf {
 fn leggi(percorso: &Path) -> Option<GiroSalvato> {
     let testo = std::fs::read_to_string(percorso).ok()?;
     let g: GiroSalvato = toml::from_str(&testo).ok()?;
-    (g.formato <= FORMATO && !g.scenario.is_empty()).then_some(g)
+    (g.formato >= 1 && g.formato <= FORMATO && !g.scenario.is_empty()).then_some(g)
 }
 
 impl Storico {
@@ -226,27 +262,31 @@ impl Storico {
         self.giri.iter().filter(move |g| g.scenario == scenario)
     }
 
-    /// Il record dello scenario: i colpi del giro migliore.
-    pub fn record(&self, scenario: &str) -> Option<u32> {
-        self.giri_di(scenario).map(|g| g.colpi).max()
+    /// Il record dello scenario: il punteggio del giro migliore coi parametri standard.
+    pub fn record(&self, scenario: &str) -> Option<f64> {
+        massimo(self.giri_di(scenario).filter(|g| g.standard()).map(GiroSalvato::punteggio))
     }
 
     /// I giri dello scenario da quando è partito aimpro.
     pub fn sessione(&self, scenario: &str) -> Sessione {
-        let colpi: Vec<u32> =
-            self.giri_di(scenario).filter(|g| g.istante_ms >= self.avvio_ms).map(|g| g.colpi).collect();
+        let di_sessione = || self.giri_di(scenario).filter(|g| g.istante_ms >= self.avvio_ms);
+        let punti: Vec<f64> = di_sessione().filter(|g| g.standard()).map(GiroSalvato::punteggio).collect();
         Sessione {
-            giri: colpi.len(),
-            media_colpi: (!colpi.is_empty())
-                .then(|| colpi.iter().map(|&c| f64::from(c)).sum::<f64>() / colpi.len() as f64),
-            migliore: colpi.iter().copied().max(),
+            giri: punti.len(),
+            media: (!punti.is_empty()).then(|| punti.iter().sum::<f64>() / punti.len() as f64),
+            migliore: massimo(punti.iter().copied()),
+            cambiati: di_sessione().filter(|g| !g.standard()).count(),
         }
     }
 
     /// Scrive il giro nel suo file e lo aggiunge allo storico; dice il confronto con il record di prima.
     /// Anche se la scrittura non riesce, il giro resta in memoria fino alla chiusura.
     pub fn aggiungi(&mut self, mut g: GiroSalvato, ora: Ora) -> (Confronto, std::io::Result<PathBuf>) {
-        let confronto = Confronto { colpi: g.colpi, record_prima: self.record(&g.scenario) };
+        let confronto = Confronto {
+            punteggio: g.punteggio(),
+            record_prima: self.record(&g.scenario),
+            standard: g.standard(),
+        };
         let scritto = self.scrivi(&g, ora);
         g.bersagli = Vec::new();
         self.giri.push(g);
@@ -301,7 +341,10 @@ pub mod test {
             precisione: Some(f64::from(colpi) / f64::from(colpi + 3)),
             tempo_medio_ms: Some(702.25),
             overshoot: 4,
+            punteggio: Some(f64::from(colpi)),
+            tracking: None,
             impostazioni: Impostazioni::da_config(&Config::default()),
+            parametri: Parametri::STANDARD,
             bersagli: vec![
                 Bersaglio { tempo_ms: 640.5, distanza_gradi: 23.25, overshoot: 1 },
                 Bersaglio { tempo_ms: 764.0, distanza_gradi: 31.0, overshoot: 0 },
@@ -328,7 +371,7 @@ pub mod test {
     fn il_file_ha_tutti_i_campi() {
         let testo = toml::to_string(&giro_di_prova(42, 1000)).unwrap();
         for campo in [
-            "formato = 1",
+            "formato = 2",
             "scenario = \"scatto\"",
             "data = \"2026-11-22 14:03:05\"",
             "istante_ms = 1000",
@@ -338,6 +381,10 @@ pub mod test {
             "precisione = ",
             "tempo_medio_ms = 702.25",
             "overshoot = 4",
+            "punteggio = 42.0",
+            "[parametri]",
+            "dimensione = 1.0",
+            "velocita = 1.0",
             "[impostazioni]",
             "gioco = \"cs2\"",
             "sensibilita = ",
@@ -376,7 +423,7 @@ pub mod test {
         std::fs::write(d.join("rotto.toml"), "colpi = [non toml").unwrap();
         std::fs::write(d.join("mezzo.toml"), "formato = 1\ncolpi = 5\n").unwrap();
         let mut futuro = toml::to_string(&giro_di_prova(99, 3000)).unwrap();
-        futuro = futuro.replace("formato = 1", "formato = 9");
+        futuro = futuro.replace("formato = 2", "formato = 9");
         std::fs::write(d.join("futuro.toml"), futuro).unwrap();
         std::fs::write(d.join("nota.txt"), "non è dello storico").unwrap();
         std::fs::write(d.join("x.toml.nuovo"), "a metà").unwrap();
@@ -402,16 +449,16 @@ pub mod test {
         assert!(c.nuovo_record() && c.record_prima.is_none());
         let (c, _) = s.aggiungi(giro_di_prova(25, 2), ora(2));
         assert!(!c.nuovo_record());
-        assert_eq!(c.differenza(), Some(-5));
+        assert_eq!(c.differenza(), Some(-5.0));
         let (c, _) = s.aggiungi(giro_di_prova(30, 3), ora(3));
         assert!(!c.nuovo_record(), "pareggiare non è un record nuovo");
-        assert_eq!(c.differenza(), Some(0));
+        assert_eq!(c.differenza(), Some(0.0));
         let (c, _) = s.aggiungi(giro_di_prova(34, 4), ora(4));
         assert!(c.nuovo_record());
-        assert_eq!(c.differenza(), Some(4));
+        assert_eq!(c.differenza(), Some(4.0));
         // Riavvio: si rilegge dai file.
         let s = Storico::carica(d.clone(), 0);
-        assert_eq!(s.record(SCATTO), Some(34));
+        assert_eq!(s.record(SCATTO), Some(34.0));
         assert_eq!(s.record("altro"), None);
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -422,11 +469,14 @@ pub mod test {
         let mut s = Storico::carica(d.clone(), 0);
         s.aggiungi(giro_di_prova(50, 100), ora(1)).1.unwrap();
         let mut s = Storico::carica(d.clone(), 1000);
-        assert_eq!(s.sessione(SCATTO), Sessione { giri: 0, media_colpi: None, migliore: None });
+        assert_eq!(s.sessione(SCATTO), Sessione { giri: 0, media: None, migliore: None, cambiati: 0 });
         s.aggiungi(giro_di_prova(20, 2000), ora(2)).1.unwrap();
         s.aggiungi(giro_di_prova(31, 3000), ora(3)).1.unwrap();
-        assert_eq!(s.sessione(SCATTO), Sessione { giri: 2, media_colpi: Some(25.5), migliore: Some(31) });
-        assert_eq!(s.record(SCATTO), Some(50), "il record guarda tutto lo storico");
+        assert_eq!(
+            s.sessione(SCATTO),
+            Sessione { giri: 2, media: Some(25.5), migliore: Some(31.0), cambiati: 0 }
+        );
+        assert_eq!(s.record(SCATTO), Some(50.0), "il record guarda tutto lo storico");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -438,14 +488,14 @@ pub mod test {
         g.scenario = "tracking 1/2.v3".to_string();
         let p = s.aggiungi(g, ora(1)).1.unwrap();
         assert_eq!(p.file_name().unwrap(), "20261122-140301-007-tracking_1_2_v3.toml");
-        assert_eq!(Storico::carica(d.clone(), 0).record("tracking 1/2.v3"), Some(5));
+        assert_eq!(Storico::carica(d.clone(), 0).record("tracking 1/2.v3"), Some(5.0));
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
     fn un_primo_giro_senza_colpi_non_e_un_record_nuovo() {
-        assert!(!Confronto { colpi: 0, record_prima: None }.nuovo_record());
-        assert!(Confronto { colpi: 1, record_prima: None }.nuovo_record());
+        assert!(!Confronto { punteggio: 0.0, record_prima: None, standard: true }.nuovo_record());
+        assert!(Confronto { punteggio: 1.0, record_prima: None, standard: true }.nuovo_record());
     }
 
     #[test]
@@ -468,6 +518,89 @@ pub mod test {
         s.aggiungi(giro_di_prova(2, 2000), ora(3)).1.unwrap();
         let s = Storico::carica(d.clone(), 0);
         assert_eq!(s.giri().iter().map(|g| g.colpi).collect::<Vec<_>>(), [1, 2, 3]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Un file del formato 1, come lo scriveva aimpro prima degli scenari.
+    const FORMATO_1: &str = r#"formato = 1
+scenario = "scatto"
+data = "2026-11-22 14:00:34"
+istante_ms = 1795352434530
+durata_s = 30.0
+colpi = 88
+errori = 0
+precisione = 1.0
+tempo_medio_ms = 338.28
+overshoot = 89
+
+[impostazioni]
+gioco = "cs2"
+sensibilita = 1.25
+cm_360 = 41.56
+fov = 90.0
+dpi = 800.0
+vsync = false
+limite_fps = 0
+versione = "0.1.0"
+
+[[bersagli]]
+tempo_ms = 297.44
+distanza_gradi = 24.78
+overshoot = 1
+"#;
+
+    #[test]
+    fn i_giri_del_formato_1_si_leggono_ancora() {
+        let d = cartella_di_prova("formato1");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("20261122-140034-530-scatto.toml"), FORMATO_1).unwrap();
+        let s = Storico::carica(d.clone(), 0);
+        assert_eq!(s.saltati, 0);
+        let g = &s.giri()[0];
+        assert_eq!((g.formato, g.colpi, g.punteggio(), g.tracking), (1, 88, 88.0, None));
+        assert!(g.standard(), "senza parametri: quelli standard");
+        assert_eq!(s.record(SCATTO), Some(88.0));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn il_formato_2_salva_il_punteggio_del_tracking() {
+        let d = cartella_di_prova("tracking");
+        let mut s = Storico::carica(d.clone(), 0);
+        let mut g = giro_di_prova(0, 1);
+        g.scenario = "filo".into();
+        (g.errori, g.precisione, g.tempo_medio_ms, g.overshoot) = (0, None, None, 0);
+        g.bersagli.clear();
+        g.tracking = Some(0.734);
+        g.punteggio = Some(73.4);
+        let p = s.aggiungi(g.clone(), ora(1)).1.unwrap();
+        let testo = std::fs::read_to_string(p).unwrap();
+        assert!(testo.contains("formato = 2") && testo.contains("tracking = 0.734"), "{testo}");
+        assert!(testo.contains("punteggio = 73.4"), "{testo}");
+        let s = Storico::carica(d.clone(), 0);
+        assert_eq!(s.giri()[0].tracking, Some(0.734));
+        assert_eq!(s.record("filo"), Some(73.4));
+        assert_eq!(s.record(SCATTO), None, "record per scenario");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn coi_parametri_cambiati_il_giro_si_salva_ma_non_fa_record() {
+        let d = cartella_di_prova("parametri");
+        let mut s = Storico::carica(d.clone(), 0);
+        s.aggiungi(giro_di_prova(30, 1), ora(1)).1.unwrap();
+        let mut g = giro_di_prova(60, 2);
+        g.parametri = Parametri { dimensione: 1.5, velocita: 1.0 };
+        let (c, scritto) = s.aggiungi(g, ora(2));
+        assert!(scritto.is_ok(), "salvato");
+        assert!(!c.standard && !c.nuovo_record(), "non è un record");
+        assert_eq!(c.record_prima, Some(30.0));
+        let s = Storico::carica(d.clone(), 0);
+        assert_eq!(s.giri().len(), 2);
+        assert_eq!(s.giri()[1].parametri.dimensione, 1.5);
+        assert_eq!(s.record(SCATTO), Some(30.0), "il record resta quello coi parametri standard");
+        let ses = s.sessione(SCATTO);
+        assert_eq!((ses.giri, ses.cambiati, ses.migliore), (2 - 1, 1, Some(30.0)));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

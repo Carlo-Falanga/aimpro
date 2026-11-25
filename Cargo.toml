@@ -40,6 +40,10 @@ windows = { version = "0.62.2", features = [
 ] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
+[dev-dependencies]
+# Solo nei test: lo shader si controlla (e si traduce in HLSL, come fa wgpu su DX12) senza aprire una finestra.
+naga = { version = "30.0.2", features = ["wgsl-in", "hlsl-out"] }
+
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
 

@@ -8,6 +8,9 @@
 //! - Niente buffer di profondità né multisample: una stanza vista da dentro, una sfera e dei rettangoli.
 //! - A ogni frame vanno nella lista dei comandi solo 128 byte di costanti immediate; i rettangoli si riscrivono
 //!   quando cambia il secondo mostrato o la risoluzione.
+//! - Le sfere (fino a `MAX_SFERE`, disegnate in un'istanza ciascuna) stanno nel buffer delle uniformi con il loro
+//!   tratto di moto: lo shader ne calcola il centro dal tempo di gioco, quindi il buffer si riscrive solo quando un
+//!   tratto cambia (sfera colpita, cambio di direzione), non a ogni frame.
 
 use std::sync::Arc;
 
@@ -15,6 +18,8 @@ use bytemuck::{Pod, Zeroable};
 use glam::{DVec3, Mat4};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
+
+pub use crate::scenari::MAX_SFERE;
 
 const MAX_RETT: usize = 64;
 /// Descrittori di texture e buffer che gli shader possono vedere insieme: ne usiamo meno di dieci (le uniformi e
@@ -28,7 +33,8 @@ const DESCRITTORI: u32 = 16_384;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Immediati {
     vp: [[f32; 4]; 4],
-    sfera: [f32; 4],
+    /// Tempo di gioco in secondi (per il moto delle sfere), indice della sfera guardata (-1 nessuna), libero, libero.
+    tempo: [f32; 4],
     destra: [f32; 4],
     su: [f32; 4],
     schermo: [f32; 4],
@@ -38,11 +44,33 @@ struct Immediati {
 const DIMENSIONE_IMMEDIATI: u32 = 128;
 const _: () = assert!(std::mem::size_of::<Immediati>() as u32 <= DIMENSIONE_IMMEDIATI);
 
-/// Quello che nel giro non cambia: si riscrive solo quando cambia.
+/// Una sfera per lo shader: il tratto di moto (`moto` = imbardata e beccheggio di partenza, velocità in radianti al
+/// secondo; `altro` = istante di partenza in secondi di gioco, raggio, distanza, libero).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, PartialEq, Debug, Default)]
+pub struct SferaGpu {
+    pub moto: [f32; 4],
+    pub altro: [f32; 4],
+}
+
+/// Quello che nel giro cambia di rado (l'occhio, la zona, i tratti delle sfere): si riscrive solo quando cambia.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
 struct Uniformi {
     occhio: [f32; 4],
+    /// Imbardata minima e massima, beccheggio minimo e massimo dei centri (radianti): i bordi dei rimbalzi.
+    zona: [f32; 4],
+    sfere: [SferaGpu; MAX_SFERE],
+}
+
+/// Le sfere di un frame.
+#[derive(Clone, Copy, Debug)]
+pub struct Sfere {
+    pub dati: [SferaGpu; MAX_SFERE],
+    pub n: u32,
+    pub zona: [f32; 4],
+    /// Tempo di gioco in secondi.
+    pub tempo_s: f32,
 }
 
 #[repr(C)]
@@ -59,10 +87,12 @@ pub struct Scena {
     pub occhio: DVec3,
     pub destra: DVec3,
     pub su: DVec3,
-    /// Centro e raggio della sfera.
-    pub sfera: Option<(DVec3, f64)>,
+    /// Le sfere da disegnare; `None` nel menu e durante il conto alla rovescia.
+    pub sfere: Option<Sfere>,
     /// Secondi rimasti e frazione (per il tempo in alto); `None` fuori dal giro.
     pub tempo: Option<(u32, f32)>,
+    /// Il conto alla rovescia (3, 2, 1) al centro, prima del giro.
+    pub conto: Option<u32>,
 }
 
 /// Il disegno di egui da aggiungere sopra la scena.
@@ -101,8 +131,8 @@ pub struct Grafica {
     gruppo: wgpu::BindGroup,
     rett: [Rett; MAX_RETT],
     n_rett: usize,
-    /// Secondi e dimensioni dell'ultima scrittura dei rettangoli; se cambiano si riscrivono.
-    rett_scritti: (u32, u32, u32, bool),
+    /// Secondi, conto alla rovescia e dimensioni dell'ultima scrittura dei rettangoli; se cambiano si riscrivono.
+    rett_scritti: (u32, u32, u32, u32, bool),
     scala: f32,
 }
 
@@ -331,7 +361,7 @@ impl Grafica {
             gruppo,
             rett: [Rett::default(); MAX_RETT],
             n_rett: 0,
-            rett_scritti: (u32::MAX, 0, 0, false),
+            rett_scritti: (u32::MAX, 0, 0, 0, false),
             scala: finestra_scala(),
         })
     }
@@ -344,7 +374,7 @@ impl Grafica {
         self.config.height = altezza;
         self.scala = scala.max(1.0);
         self.surface.configure(&self.device, &self.config);
-        self.rett_scritti = (u32::MAX, 0, 0, false);
+        self.rett_scritti = (u32::MAX, 0, 0, 0, false);
     }
 
     pub fn imposta_vsync(&mut self, vsync: bool) {
@@ -389,23 +419,31 @@ impl Grafica {
         let mut immediati = Immediati::zeroed();
         if let Some(s) = scena {
             let (secondi, frazione) = s.tempo.unwrap_or((0, 0.0));
-            let (cx, cy, r) = s.sfera.map_or((0.0, 0.0, 0.0), |(c, r)| (c.x, c.y, r));
-            let cz = s.sfera.map_or(0.0, |(c, _)| c.z);
             immediati = Immediati {
                 vp: s.vp.to_cols_array_2d(),
-                sfera: [cx as f32, cy as f32, cz as f32, r as f32],
+                tempo: [s.sfere.map_or(0.0, |x| x.tempo_s), -1.0, 0.0, 0.0],
                 destra: [s.destra.x as f32, s.destra.y as f32, s.destra.z as f32, 0.0],
                 su: [s.su.x as f32, s.su.y as f32, s.su.z as f32, 0.0],
                 schermo: [self.config.width as f32, self.config.height as f32, frazione, self.scala],
             };
-            let u = Uniformi { occhio: [s.occhio.x as f32, s.occhio.y as f32, s.occhio.z as f32, 0.0] };
+            // Senza sfere (menu, conto alla rovescia) si tengono quelle di prima: niente scrittura in più.
+            let precedenti = self
+                .uniformi_scritte
+                .map_or(([0.0; 4], [SferaGpu::default(); MAX_SFERE]), |u| (u.zona, u.sfere));
+            let (zona, sfere) = s.sfere.map_or(precedenti, |x| (x.zona, x.dati));
+            let u = Uniformi {
+                occhio: [s.occhio.x as f32, s.occhio.y as f32, s.occhio.z as f32, 0.0],
+                zona,
+                sfere,
+            };
             if self.uniformi_scritte != Some(u) {
                 self.queue.write_buffer(&self.b_uniformi, 0, bytemuck::bytes_of(&u));
                 self.uniformi_scritte = Some(u);
             }
-            let chiave = (secondi, self.config.width, self.config.height, s.tempo.is_some());
+            let conto = s.conto.unwrap_or(0);
+            let chiave = (secondi, conto, self.config.width, self.config.height, s.tempo.is_some());
             if chiave != self.rett_scritti {
-                self.prepara_rettangoli(s.tempo.map(|t| t.0));
+                self.prepara_rettangoli(s.tempo.map(|t| t.0), s.conto);
                 self.queue.write_buffer(&self.b_rett, 0, bytemuck::cast_slice(&self.rett[..self.n_rett]));
                 self.rett_scritti = chiave;
             }
@@ -442,9 +480,9 @@ impl Grafica {
                 pass.set_immediates(0, bytemuck::bytes_of(&immediati));
                 pass.set_vertex_buffer(0, self.b_stanza.slice(..));
                 pass.draw(0..self.vertici_stanza, 0..1);
-                if s.sfera.is_some() {
+                if let Some(x) = s.sfere.filter(|x| x.n > 0) {
                     pass.set_pipeline(&self.p_sfera);
-                    pass.draw(0..6, 0..1);
+                    pass.draw(0..6, 0..x.n.min(MAX_SFERE as u32));
                 }
                 if self.n_rett > 0 {
                     pass.set_pipeline(&self.p_rett);
@@ -474,7 +512,7 @@ impl Grafica {
         }
     }
 
-    fn prepara_rettangoli(&mut self, secondi: Option<u32>) {
+    fn prepara_rettangoli(&mut self, secondi: Option<u32>, conto: Option<u32>) {
         self.n_rett = 0;
         let s = self.scala;
         let (w, h) = (self.config.width as f32, self.config.height as f32);
@@ -525,6 +563,13 @@ impl Grafica {
             self.aggiungi(xb, yb, lb, hb, [1.0, 1.0, 1.0, 0.18], 0.0);
             self.aggiungi(xb, yb, lb, hb, [1.0, 0.69, 0.13, 0.95], 1.0);
         }
+        if let Some(n) = conto {
+            // Il conto alla rovescia: una cifra grande sopra il mirino.
+            let ch = (120.0 * s).round();
+            let cw = (68.0 * s).round();
+            let t = (14.0 * s).round().max(4.0);
+            self.cifra(n % 10, (cx - cw / 2.0).round(), (cy - ch - 60.0 * s).round(), cw, ch, t);
+        }
     }
 
     fn cifra(&mut self, n: u32, x: f32, y: f32, w: f32, h: f32, t: f32) {
@@ -551,4 +596,38 @@ impl Grafica {
 
 fn finestra_scala() -> f32 {
     1.0
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Lo shader si legge, è valido e si traduce in HLSL come fa wgpu su DirectX 12: un errore si vede nei test, non
+    /// all'avvio del gioco.
+    #[test]
+    fn lo_shader_e_valido_e_diventa_hlsl() {
+        let modulo = naga::front::wgsl::parse_str(include_str!("scena.wgsl")).expect("WGSL");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&modulo)
+        .expect("shader valido");
+        let opzioni = naga::back::hlsl::Options {
+            immediates_target: Some(naga::back::hlsl::BindTarget::default()),
+            ..Default::default()
+        };
+        let mut hlsl = String::new();
+        naga::back::hlsl::Writer::new(&mut hlsl, &opzioni, &Default::default())
+            .write(&modulo, &info, None)
+            .expect("HLSL");
+        assert!(hlsl.contains("vs_sfera") && hlsl.contains("fs_sfera"));
+    }
+
+    #[test]
+    fn i_dati_dello_shader_hanno_le_misure_giuste() {
+        assert_eq!(std::mem::size_of::<Immediati>(), 128);
+        // occhio, zona e 8 sfere da 32 byte: come `Uniformi` in scena.wgsl.
+        assert_eq!(std::mem::size_of::<Uniformi>(), 16 + 16 + 32 * MAX_SFERE);
+    }
 }

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::scenari::Parametri;
 use crate::sensibilita::Gioco;
 
 pub const LIMITI_SENSIBILITA: (f64, f64) = (0.001, 100.0);
@@ -32,6 +33,11 @@ pub struct Config {
     /// All'avvio chiede a GitHub se c'è una build più nuova (acceso di base; un file vecchio senza il campo lo
     /// prende acceso).
     pub controlla_aggiornamenti: bool,
+    /// L'id dello scenario scelto nel menu (un file vecchio senza il campo prende lo scatto).
+    pub scenario: String,
+    /// Dimensione e velocità dei bersagli, 1 = come dice lo scenario (fra 0,5 e 2).
+    pub dimensione: f64,
+    pub velocita: f64,
 }
 
 impl Default for Config {
@@ -55,7 +61,14 @@ impl Config {
             limite_fps: 0,
             schermo_intero_esclusivo: true,
             controlla_aggiornamenti: true,
+            scenario: crate::storico::SCATTO.to_string(),
+            dimensione: 1.0,
+            velocita: 1.0,
         }
+    }
+
+    pub fn parametri(&self) -> Parametri {
+        Parametri { dimensione: self.dimensione, velocita: self.velocita }
     }
 
     /// Riporta ogni valore fuori dai limiti al predefinito del gioco.
@@ -72,6 +85,11 @@ impl Config {
         }
         if self.limite_fps != 0 && !(LIMITI_FPS.0..=LIMITI_FPS.1).contains(&self.limite_fps) {
             self.limite_fps = 0;
+        }
+        let p = self.parametri().normalizzati();
+        (self.dimensione, self.velocita) = (p.dimensione, p.velocita);
+        if self.scenario.trim().is_empty() {
+            self.scenario = crate::storico::SCATTO.to_string();
         }
         self
     }
@@ -148,6 +166,9 @@ mod test {
             limite_fps: 240,
             schermo_intero_esclusivo: false,
             controlla_aggiornamenti: false,
+            scenario: "terna".to_string(),
+            dimensione: 1.25,
+            velocita: 0.75,
         };
         salva(&p, &c).unwrap();
         assert_eq!(carica(&p), (c, None));
@@ -185,8 +206,12 @@ mod test {
             limite_fps: 5,
             schermo_intero_esclusivo: true,
             controlla_aggiornamenti: true,
+            scenario: String::new(),
+            dimensione: 7.0,
+            velocita: -1.0,
         }
         .normalizzata();
+        assert_eq!((c.scenario.as_str(), c.dimensione, c.velocita), ("scatto", 2.0, 0.5));
         assert_eq!(c.sensibilita, 0.4);
         assert_eq!(c.fov, 103.0);
         assert_eq!(c.dpi, 800.0);
@@ -233,6 +258,7 @@ schermo_intero_esclusivo = true
         assert_eq!(avviso, None);
         assert!(c.controlla_aggiornamenti);
         assert!(Config::default().controlla_aggiornamenti, "acceso di base");
+        assert_eq!((c.scenario.as_str(), c.dimensione, c.velocita), ("scatto", 1.0, 1.0), "scenari standard");
         std::fs::write(
             &p,
             "controlla_aggiornamenti = false

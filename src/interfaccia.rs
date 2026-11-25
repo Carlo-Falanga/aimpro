@@ -7,8 +7,9 @@ use egui::{Align2, Color32, CornerRadius, FontId, Frame, Margin, Pos2, RichText,
 use crate::aggiornamento::Stato as StatoAggiornamento;
 use crate::config::{Config, LIMITI_DPI, LIMITI_FOV, LIMITI_FPS, LIMITI_SENSIBILITA};
 use crate::giro::Riepilogo;
+use crate::scenari::{LIMITI_PARAMETRO, Parametri, Scenario, TipoMovimento};
 use crate::sensibilita::{Gioco, cm_per_360, converti, gradi_per_count};
-use crate::storico::{Confronto, GiroSalvato, SCATTO, Storico};
+use crate::storico::{Confronto, GiroSalvato, Storico};
 
 pub const ACCENTO: Color32 = Color32::from_rgb(255, 176, 33);
 const TENUE: Color32 = Color32::from_rgb(161, 163, 169);
@@ -40,6 +41,44 @@ pub struct InfoMenu<'a> {
     pub aggiornamento: &'a StatoAggiornamento,
     /// Gli Hz dello schermo, arrotondati (0 se Windows non li dice): la voce del limite pari a questi dice "(schermo)".
     pub hz_schermo: u32,
+    /// Gli scenari da scegliere e gli avvisi dei file di scenario saltati.
+    pub scenari: &'a [Scenario],
+    pub avvisi_scenari: &'a [String],
+}
+
+/// Un punteggio come si legge: i colpi, o la percentuale del tracking.
+pub fn valore(punteggio: f64, tracking: bool) -> String {
+    if tracking { format!("{punteggio:.1}%") } else { format!("{punteggio:.0} colpi") }
+}
+
+/// La riga sotto la scelta dello scenario: cosa si fa e come si conta.
+pub fn spiegazione(s: &Scenario) -> String {
+    let secondi = s.regole.durata_ms / 1000.0;
+    let conto = if s.regole.tracking() {
+        "conta il tempo con il mirino sulla sfera e il tasto sinistro premuto"
+    } else {
+        "conta i colpi; ogni clic a vuoto è un errore"
+    };
+    format!("{} {secondi:.0} secondi, {conto}.", s.descrizione)
+}
+
+/// Un campo in percentuale (50-200%, a passi di 5) per un parametro; vero se è cambiato.
+fn campo_parametro(ui: &mut Ui, valore: &mut f64, attivo: bool) -> bool {
+    let mut p = (*valore * 100.0).round();
+    let r = ui.add_enabled(
+        attivo,
+        egui::DragValue::new(&mut p)
+            .range(LIMITI_PARAMETRO.0 * 100.0..=LIMITI_PARAMETRO.1 * 100.0)
+            .speed(1.0)
+            .max_decimals(0)
+            .suffix("%"),
+    );
+    let nuovo = ((p / 5.0).round() * 5.0 / 100.0).clamp(LIMITI_PARAMETRO.0, LIMITI_PARAMETRO.1);
+    if r.changed() && (nuovo - *valore).abs() > 1e-9 {
+        *valore = nuovo;
+        return true;
+    }
+    false
 }
 
 /// Le voci fisse della tendina del limite di fps, fra "Senza limite" e "Personalizzato…".
@@ -278,11 +317,82 @@ fn pulsante(ui: &mut Ui, testo: &str, principale: bool) -> bool {
 pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
     scheda(ui, "menu", |ui| {
         ui.label(RichText::new("aimpro").size(28.0).strong());
-        ui.label(RichText::new("Scatto: 30 secondi, una sfera alla volta").color(TENUE));
-        ui.add_space(4.0);
-        ui.label("Colpisci la sfera: appena la prendi ne compare un'altra in un altro punto. Ogni clic a vuoto è un errore.");
+        let mut azione = Azione::Nessuna;
+        let scelto = info.scenari.iter().find(|s| s.id == c.scenario).or(info.scenari.first());
+        egui::Grid::new("scenario").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+            ui.label("Scenario");
+            let prima = c.scenario.clone();
+            egui::ComboBox::from_id_salt("scenario")
+                .selected_text(scelto.map_or("", |s| s.nome.as_str()))
+                .width(220.0)
+                .height(400.0)
+                .show_ui(ui, |ui| {
+                    for s in info.scenari {
+                        ui.selectable_value(&mut c.scenario, s.id.clone(), &s.nome)
+                            .on_hover_text(&s.descrizione);
+                    }
+                });
+            if c.scenario != prima {
+                azione = Azione::Impostazioni;
+            }
+            ui.end_row();
+
+            ui.label("Dimensione bersagli");
+            if campo_parametro(ui, &mut c.dimensione, true) {
+                azione = Azione::Impostazioni;
+            }
+            ui.end_row();
+
+            let si_muove = info
+                .scenari
+                .iter()
+                .find(|s| s.id == c.scenario)
+                .is_some_and(|s| s.regole.movimento != TipoMovimento::Fermo);
+            ui.label("Velocità bersagli");
+            ui.horizontal(|ui| {
+                if campo_parametro(ui, &mut c.velocita, si_muove) {
+                    azione = Azione::Impostazioni;
+                }
+                if !si_muove {
+                    ui.label(
+                        RichText::new("le sfere di questo scenario stanno ferme").color(TENUE).size(12.0),
+                    );
+                }
+            });
+            ui.end_row();
+        });
+        if let Some(s) = info.scenari.iter().find(|s| s.id == c.scenario) {
+            ui.label(RichText::new(spiegazione(s)).color(TENUE).size(13.0));
+        }
+        if !c.parametri().standard() {
+            ui.horizontal(|ui| {
+                ui.label(
+                    RichText::new("Parametri cambiati: i giri si salvano ma non fanno record.")
+                        .color(AVVISO)
+                        .size(13.0),
+                );
+                if ui.small_button("Standard").clicked() {
+                    (c.dimensione, c.velocita) =
+                        (Parametri::STANDARD.dimensione, Parametri::STANDARD.velocita);
+                    azione = Azione::Impostazioni;
+                }
+            });
+        }
+        for a in info.avvisi_scenari.iter().take(3) {
+            ui.label(RichText::new(a).color(AVVISO).size(12.0));
+        }
+        if info.avvisi_scenari.len() > 3 {
+            ui.label(
+                RichText::new(format!("e altri {} file di scenario saltati", info.avvisi_scenari.len() - 3))
+                    .color(AVVISO)
+                    .size(12.0),
+            );
+        }
         ui.separator();
-        let mut azione = aggiornamento(ui, info.build, info.aggiornamento);
+        let a = aggiornamento(ui, info.build, info.aggiornamento);
+        if a != Azione::Nessuna {
+            azione = a;
+        }
         // Mentre si scarica o si riavvia non si gioca: la rete non lavora durante il giro.
         let si_gioca =
             !matches!(info.aggiornamento, StatoAggiornamento::Scarico { .. } | StatoAggiornamento::Pronto(_));
@@ -432,13 +542,22 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
     })
 }
 
-pub fn pausa(ui: &mut Ui, secondi: u32) -> Azione {
+/// Un pulsante che risponde solo quando `attesa` è finita (Riprendi, Rigioca): prima è spento, e il menu si ridisegna
+/// da solo quando si accende.
+fn pulsante_dopo(ui: &mut Ui, testo: &str, attesa: std::time::Duration) -> bool {
+    if !attesa.is_zero() {
+        ui.ctx().request_repaint_after(attesa);
+    }
+    ui.add_enabled_ui(attesa.is_zero(), |ui| pulsante(ui, testo, true)).inner && attesa.is_zero()
+}
+
+pub fn pausa(ui: &mut Ui, secondi: u32, attesa: std::time::Duration) -> Azione {
     scheda(ui, "pausa", |ui| {
         let mut azione = Azione::Nessuna;
         ui.label(RichText::new("In pausa").size(22.0).strong());
         ui.label(RichText::new(format!("Restano {secondi} secondi. Il tempo è fermo.")).color(TENUE));
         ui.add_space(6.0);
-        if pulsante(ui, "Riprendi", true) {
+        if pulsante_dopo(ui, "Riprendi", attesa) {
             azione = Azione::Riprendi;
         }
         if pulsante(ui, "Esci dal giro", false) {
@@ -449,46 +568,86 @@ pub fn pausa(ui: &mut Ui, secondi: u32) -> Azione {
 }
 
 /// Il confronto col record come si legge nel riepilogo: il record di prima, la differenza, e se è un record nuovo.
-pub fn testo_confronto(c: &Confronto) -> (String, String, bool) {
+pub fn testo_confronto(c: &Confronto, tracking: bool) -> (String, String, bool) {
     let record = match c.record_prima {
-        Some(r) => format!("{r} colpi"),
+        Some(r) => valore(r, tracking),
         None => "nessuno prima di questo giro".to_string(),
     };
     let differenza = match c.differenza() {
-        Some(0) => "pari al record".to_string(),
-        Some(d) if d > 0 => format!("+{d} colpi"),
-        Some(d) => format!("{d} colpi"),
+        // Pari quando la differenza, arrotondata come si mostra, è zero.
+        Some(d) if valore(d.abs(), tracking) == valore(0.0, tracking) => "pari al record".to_string(),
+        Some(d) if d > 0.0 => format!("+{}", valore(d, tracking)),
+        Some(d) => format!("-{}", valore(-d, tracking)),
         None => "primo giro".to_string(),
     };
     (record, differenza, c.nuovo_record())
 }
 
-pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, confronto: Option<&Confronto>, avviso: Option<&str>) -> Azione {
+/// Quello che il riepilogo mostra oltre ai numeri del giro.
+pub struct InfoRiepilogo<'a> {
+    pub scenario: &'a Scenario,
+    pub parametri: Parametri,
+    pub confronto: Option<&'a Confronto>,
+    pub avviso: Option<&'a str>,
+    /// Quanto manca perché Rigioca risponda.
+    pub attesa: std::time::Duration,
+}
+
+/// "120%" per un parametro.
+fn percento(v: f64) -> String {
+    format!("{:.0}%", v * 100.0)
+}
+
+pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, info: &InfoRiepilogo) -> Azione {
     scheda(ui, "riepilogo", |ui| {
         let mut azione = Azione::Nessuna;
+        let tracking = r.tracking.is_some();
         ui.label(RichText::new("Fine del giro").size(22.0).strong());
-        if let Some(c) = confronto.filter(|c| c.nuovo_record()) {
+        ui.label(RichText::new(&info.scenario.nome).color(TENUE));
+        if let Some(c) = info.confronto.filter(|c| c.nuovo_record()) {
             ui.label(
-                RichText::new(format!("Nuovo record: {} colpi", c.colpi)).size(17.0).strong().color(ACCENTO),
+                RichText::new(format!("Nuovo record: {}", valore(c.punteggio, tracking)))
+                    .size(17.0)
+                    .strong()
+                    .color(ACCENTO),
             );
         }
         ui.add_space(4.0);
         let precisione = r.precisione.map_or("nessun clic".to_string(), |p| format!("{:.1}%", p * 100.0));
         let tempo = r.tempo_medio_ms.map_or("nessun colpo".to_string(), |t| format!("{t:.0} ms"));
-        egui::Grid::new("riepilogo").num_columns(2).spacing([40.0, 10.0]).show(ui, |ui| {
-            for (nome, valore) in [
+        let righe: Vec<(&str, String)> = match r.tracking {
+            Some(t) => vec![
+                ("Sul bersaglio", format!("{:.1}%", t * 100.0)),
+                (
+                    "Tempo sul bersaglio",
+                    format!("{:.1} s di {:.0}", t * info.scenario.regole.durata_ms / 1000.0, {
+                        info.scenario.regole.durata_ms / 1000.0
+                    }),
+                ),
+            ],
+            None => vec![
                 ("Colpi", r.colpi.to_string()),
                 ("Errori", r.errori.to_string()),
                 ("Precisione", precisione),
-                ("Tempo medio per bersaglio", tempo),
-            ] {
+                (
+                    if info.scenario.regole.sfere > 1 {
+                        "Tempo medio fra i colpi"
+                    } else {
+                        "Tempo medio per bersaglio"
+                    },
+                    tempo,
+                ),
+            ],
+        };
+        egui::Grid::new("riepilogo").num_columns(2).spacing([40.0, 10.0]).show(ui, |ui| {
+            for (nome, valore) in righe {
                 ui.label(nome);
                 ui.label(RichText::new(valore).strong().size(16.0));
                 ui.end_row();
             }
-            if let Some(c) = confronto {
-                let (record, differenza, _) = testo_confronto(c);
-                ui.label("Record di scatto");
+            if let Some(c) = info.confronto {
+                let (record, differenza, _) = testo_confronto(c, tracking);
+                ui.label(format!("Record di {}", info.scenario.nome));
                 ui.label(RichText::new(record).strong().size(16.0));
                 ui.end_row();
                 ui.label("Rispetto al record");
@@ -496,11 +655,22 @@ pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, confronto: Option<&Confronto>, avvi
                 ui.end_row();
             }
         });
-        if let Some(a) = avviso {
+        if !info.parametri.standard() {
+            ui.label(
+                RichText::new(format!(
+                    "Parametri cambiati (dimensione {}, velocità {}): il giro è salvato ma non conta per il record.",
+                    percento(info.parametri.dimensione),
+                    percento(info.parametri.velocita)
+                ))
+                .color(AVVISO)
+                .size(13.0),
+            );
+        }
+        if let Some(a) = info.avviso {
             ui.label(RichText::new(a).color(AVVISO).size(13.0));
         }
         ui.add_space(8.0);
-        if pulsante(ui, "Rigioca", true) {
+        if pulsante_dopo(ui, "Rigioca", info.attesa) {
             azione = Azione::Inizia;
         }
         if pulsante(ui, "Statistiche", false) {
@@ -516,15 +686,16 @@ pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, confronto: Option<&Confronto>, avvi
 /// Giri mostrati nel grafico.
 pub const GIRI_NEL_GRAFICO: usize = 30;
 
-/// Il valore in cima al grafico: un po' sopra il più alto fra giri e record, arrotondato a 5.
-pub fn cima_grafico(colpi: &[u32], record: u32) -> u32 {
-    let massimo = colpi.iter().copied().max().unwrap_or(0).max(record);
-    (massimo + massimo / 10 + 1).div_ceil(5).max(1) * 5
+/// Il valore in cima al grafico: un po' sopra il più alto fra giri e record, arrotondato a 5 (al più 100 nel tracking).
+pub fn cima_grafico(punti: &[f64], record: f64, tracking: bool) -> f64 {
+    let massimo = punti.iter().copied().fold(record, f64::max).max(0.0).floor() as u32;
+    let cima = f64::from((massimo + massimo / 10 + 1).div_ceil(5).max(1) * 5);
+    if tracking { cima.min(100.0) } else { cima }
 }
 
-fn grafico(ui: &mut Ui, giri: &[&GiroSalvato], record: u32) {
-    let colpi: Vec<u32> = giri.iter().map(|g| g.colpi).collect();
-    let cima = cima_grafico(&colpi, record) as f32;
+fn grafico(ui: &mut Ui, giri: &[&GiroSalvato], record: f64, tracking: bool) {
+    let colpi: Vec<f64> = giri.iter().map(|g| g.punteggio()).collect();
+    let cima = cima_grafico(&colpi, record, tracking) as f32;
     let (area, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 170.0), Sense::hover());
     let p = ui.painter_at(area);
     p.rect_filled(area, CornerRadius::same(8), Color32::from_white_alpha(6));
@@ -557,7 +728,7 @@ fn grafico(ui: &mut Ui, giri: &[&GiroSalvato], record: u32) {
     p.text(
         Pos2::new(dentro.right(), yr - 4.0),
         Align2::RIGHT_BOTTOM,
-        format!("record {record}"),
+        format!("record {}", if tracking { format!("{record:.1}%") } else { format!("{record:.0}") }),
         font,
         chiaro,
     );
@@ -567,7 +738,7 @@ fn grafico(ui: &mut Ui, giri: &[&GiroSalvato], record: u32) {
     let punti: Vec<Pos2> = colpi
         .iter()
         .enumerate()
-        .map(|(i, &c)| Pos2::new(dentro.right() - passo * (ultimo - i) as f32, y(c as f32)))
+        .map(|(i, &c)| Pos2::new(dentro.right() - passo * (ultimo - i) as f32, y(c as f32).max(dentro.top())))
         .collect();
     if punti.len() > 1 {
         p.add(Shape::line(punti.clone(), Stroke::new(2.0, ACCENTO)));
@@ -585,18 +756,19 @@ fn millisecondi(t: Option<f64>) -> String {
     t.map_or("-".to_string(), |t| format!("{t:.0} ms"))
 }
 
-/// Colonne dell'elenco dei giri: titolo e larghezza.
-const COLONNE: [(&str, f32); 7] = [
-    ("Data", 150.0),
-    ("Colpi", 60.0),
-    ("Errori", 60.0),
-    ("Precisione", 90.0),
-    ("Tempo medio", 100.0),
-    ("Overshoot", 85.0),
-    ("Sensibilità", 130.0),
+/// Colonne dell'elenco dei giri: titolo e larghezza. Nel tracking la seconda è "Sul bersaglio".
+const COLONNE: [(&str, f32); 8] = [
+    ("Data", 140.0),
+    ("Colpi", 80.0),
+    ("Errori", 55.0),
+    ("Precisione", 85.0),
+    ("Tempo medio", 95.0),
+    ("Overshoot", 80.0),
+    ("Sensibilità", 105.0),
+    ("Parametri", 90.0),
 ];
 
-fn riga(ui: &mut Ui, celle: [String; 7], intestazione: bool) {
+fn riga(ui: &mut Ui, celle: [String; 8], intestazione: bool) {
     ui.horizontal(|ui| {
         for ((_, w), testo) in COLONNE.iter().zip(celle) {
             let t = RichText::new(testo).size(13.0);
@@ -606,72 +778,143 @@ fn riga(ui: &mut Ui, celle: [String; 7], intestazione: bool) {
     });
 }
 
-/// La schermata Statistiche dello scenario scatto: grafico degli ultimi giri con il record, la sessione e l'elenco.
-pub fn statistiche(ui: &mut Ui, s: &Storico, esportato: Option<&str>) -> Azione {
-    scheda_larga(ui, "statistiche", 760.0, |ui| {
+/// Gli scenari che la schermata Statistiche può mostrare: quelli caricati, più gli id che stanno solo nello storico
+/// (uno scenario dell'utente tolto dalla cartella), con il loro id come nome. Id, nome, tracking.
+pub fn scenari_delle_statistiche(scenari: &[Scenario], s: &Storico) -> Vec<(String, String, bool)> {
+    let mut v: Vec<(String, String, bool)> =
+        scenari.iter().map(|x| (x.id.clone(), x.nome.clone(), x.regole.tracking())).collect();
+    for g in s.giri() {
+        if !v.iter().any(|(id, _, _)| *id == g.scenario) {
+            v.push((g.scenario.clone(), g.scenario.clone(), g.tracking.is_some()));
+        }
+    }
+    v
+}
+
+/// La schermata Statistiche di uno scenario: grafico degli ultimi giri con il record, la sessione e l'elenco.
+pub fn statistiche(
+    ui: &mut Ui,
+    s: &Storico,
+    scenari: &[Scenario],
+    scelto: &mut String,
+    esportato: Option<&str>,
+) -> Azione {
+    scheda_larga(ui, "statistiche", 800.0, |ui| {
         let mut azione = Azione::Nessuna;
         ui.label(RichText::new("Statistiche").size(26.0).strong());
-        ui.label(RichText::new("Scatto, 30 secondi").color(TENUE));
-        let giri: Vec<&GiroSalvato> = s.giri_di(SCATTO).collect();
-        if giri.is_empty() {
+        let elenco = scenari_delle_statistiche(scenari, s);
+        let (nome, tracking) = elenco
+            .iter()
+            .find(|(id, _, _)| id == scelto)
+            .map_or((scelto.clone(), false), |(_, n, t)| (n.clone(), *t));
+        ui.horizontal(|ui| {
+            ui.label("Scenario");
+            egui::ComboBox::from_id_salt("scenario statistiche")
+                .selected_text(&nome)
+                .width(220.0)
+                .height(400.0)
+                .show_ui(ui, |ui| {
+                    for (id, n, _) in &elenco {
+                        let giri = s.giri_di(id).count();
+                        ui.selectable_value(scelto, id.clone(), format!("{n} ({giri})"));
+                    }
+                });
+        });
+        let tutti: Vec<&GiroSalvato> = s.giri_di(scelto).collect();
+        let giri: Vec<&GiroSalvato> = tutti.iter().copied().filter(|g| g.standard()).collect();
+        let cambiati = tutti.len() - giri.len();
+        let unita = if tracking { "Tempo sul bersaglio" } else { "Colpi" };
+        if tutti.is_empty() {
             ui.add_space(6.0);
-            ui.label("Nessun giro salvato. Gioca uno scatto: ogni giro finito compare qui, con il record e l'andamento.");
+            ui.label(format!(
+                "Nessun giro salvato di {nome}. Ogni giro finito compare qui, con il record e l'andamento."
+            ));
         } else {
-            let record = s.record(SCATTO).unwrap_or(0);
-            let sessione = s.sessione(SCATTO);
+            let record = s.record(scelto).unwrap_or(0.0);
+            let sessione = s.sessione(scelto);
             ui.add_space(4.0);
             let inizio = giri.len().saturating_sub(GIRI_NEL_GRAFICO);
             let n = giri.len() - inizio;
             ui.label(
-                RichText::new(if n == 1 {
-                    "Colpi dell'ultimo giro, con la linea del record".to_string()
-                } else {
-                    format!("Colpi degli ultimi {n} giri, con la linea del record")
+                RichText::new(match n {
+                    0 => "Nessun giro coi parametri standard: il grafico e il record contano solo quelli"
+                        .to_string(),
+                    1 => format!("{unita} dell'ultimo giro, con la linea del record"),
+                    _ => format!("{unita} degli ultimi {n} giri, con la linea del record"),
                 })
                 .size(13.0)
                 .color(TENUE),
             );
-            grafico(ui, &giri[inizio..], record);
+            grafico(ui, &giri[inizio..], record, tracking);
             ui.add_space(2.0);
             egui::Grid::new("sessione").num_columns(2).spacing([40.0, 8.0]).show(ui, |ui| {
                 ui.label("Record");
-                ui.label(RichText::new(format!("{record} colpi")).strong());
+                ui.label(
+                    RichText::new(if giri.is_empty() { "nessuno".into() } else { valore(record, tracking) })
+                        .strong(),
+                );
                 ui.end_row();
                 ui.label("Da quando hai aperto aimpro");
-                let testo = match (sessione.media_colpi, sessione.migliore) {
+                let testo = match (sessione.media, sessione.migliore) {
                     (Some(m), Some(b)) => format!(
-                        "{} {}, media {m:.1} colpi, migliore {b}",
+                        "{} {}, media {}, migliore {}",
                         sessione.giri,
-                        if sessione.giri == 1 { "giro" } else { "giri" }
+                        if sessione.giri == 1 { "giro" } else { "giri" },
+                        if tracking { format!("{m:.1}%") } else { format!("{m:.1} colpi") },
+                        valore(b, tracking)
                     ),
                     _ => "nessun giro".to_string(),
                 };
                 ui.label(RichText::new(testo).strong());
                 ui.end_row();
                 ui.label("Giri salvati");
-                ui.label(RichText::new(giri.len().to_string()).strong());
+                ui.label(
+                    RichText::new(if cambiati > 0 {
+                        format!(
+                            "{}, di cui {cambiati} coi parametri cambiati (fuori da record e grafico)",
+                            tutti.len()
+                        )
+                    } else {
+                        tutti.len().to_string()
+                    })
+                    .strong(),
+                );
                 ui.end_row();
             });
             ui.separator();
-            riga(ui, COLONNE.map(|(t, _)| t.to_string()), true);
+            let mut titoli = COLONNE.map(|(t, _)| t.to_string());
+            if tracking {
+                titoli[1] = "Sul bersaglio".to_string();
+            }
+            riga(ui, titoli, true);
             egui::ScrollArea::vertical().max_height(200.0).auto_shrink([false, true]).show_rows(
                 ui,
                 18.0,
-                giri.len(),
+                tutti.len(),
                 |ui, righe| {
                     for i in righe {
                         // Il più recente in alto.
-                        let g = giri[giri.len() - 1 - i];
+                        let g = tutti[tutti.len() - 1 - i];
+                        let col_tracking = g.tracking.is_some();
                         riga(
                             ui,
                             [
                                 g.data.clone(),
-                                g.colpi.to_string(),
-                                g.errori.to_string(),
+                                if col_tracking { percentuale(g.tracking) } else { g.colpi.to_string() },
+                                if col_tracking { "-".into() } else { g.errori.to_string() },
                                 percentuale(g.precisione),
                                 millisecondi(g.tempo_medio_ms),
-                                g.overshoot.to_string(),
+                                if col_tracking { "-".into() } else { g.overshoot.to_string() },
                                 format!("{} {}", g.impostazioni.gioco.nome(), g.impostazioni.sensibilita),
+                                if g.standard() {
+                                    "standard".into()
+                                } else {
+                                    format!(
+                                        "{} / {}",
+                                        percento(g.parametri.dimensione),
+                                        percento(g.parametri.velocita)
+                                    )
+                                },
                             ],
                             false,
                         );
@@ -696,7 +939,8 @@ pub fn statistiche(ui: &mut Ui, s: &Storico, esportato: Option<&str>) -> Azione 
         ui.horizontal(|ui| {
             let w = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
             let esporta = egui::Button::new(RichText::new("Esporta CSV").size(16.0).strong());
-            if ui.add_enabled_ui(!giri.is_empty(), |ui| ui.add_sized([w, 38.0], esporta)).inner.clicked() {
+            if ui.add_enabled_ui(!s.giri().is_empty(), |ui| ui.add_sized([w, 38.0], esporta)).inner.clicked()
+            {
                 azione = Azione::EsportaCsv;
             }
             let torna = egui::Button::new(RichText::new("Torna al menu").size(16.0).strong());
@@ -737,17 +981,41 @@ pub fn pannello_latenza(ui: &mut Ui, testo: &str) {
 mod test {
     use super::*;
 
-    fn c(colpi: u32, record_prima: Option<u32>) -> Confronto {
-        Confronto { colpi, record_prima }
+    fn c(punteggio: f64, record_prima: Option<f64>) -> Confronto {
+        Confronto { punteggio, record_prima, standard: true }
     }
 
     #[test]
     fn il_confronto_dice_record_differenza_e_record_nuovo() {
         let s = |a: &str, b: &str, n| (a.to_string(), b.to_string(), n);
-        assert_eq!(testo_confronto(&c(34, Some(30))), s("30 colpi", "+4 colpi", true));
-        assert_eq!(testo_confronto(&c(25, Some(30))), s("30 colpi", "-5 colpi", false));
-        assert_eq!(testo_confronto(&c(30, Some(30))), s("30 colpi", "pari al record", false));
-        assert_eq!(testo_confronto(&c(12, None)), s("nessuno prima di questo giro", "primo giro", true));
+        assert_eq!(testo_confronto(&c(34.0, Some(30.0)), false), s("30 colpi", "+4 colpi", true));
+        assert_eq!(testo_confronto(&c(25.0, Some(30.0)), false), s("30 colpi", "-5 colpi", false));
+        assert_eq!(testo_confronto(&c(30.0, Some(30.0)), false), s("30 colpi", "pari al record", false));
+        assert_eq!(
+            testo_confronto(&c(12.0, None), false),
+            s("nessuno prima di questo giro", "primo giro", true)
+        );
+    }
+
+    #[test]
+    fn il_confronto_del_tracking_e_in_percentuale() {
+        let s = |a: &str, b: &str, n| (a.to_string(), b.to_string(), n);
+        assert_eq!(testo_confronto(&c(73.44, Some(70.0)), true), s("70.0%", "+3.4%", true));
+        assert_eq!(testo_confronto(&c(65.0, Some(70.0)), true), s("70.0%", "-5.0%", false));
+        assert_eq!(testo_confronto(&c(70.01, Some(70.0)), true).1, "pari al record");
+    }
+
+    #[test]
+    fn coi_parametri_cambiati_niente_record_nuovo() {
+        let x = Confronto { punteggio: 99.0, record_prima: Some(30.0), standard: false };
+        assert!(!testo_confronto(&x, false).2);
+    }
+
+    #[test]
+    fn la_spiegazione_dice_durata_e_conto() {
+        let s = crate::scenari::di_aimpro();
+        assert!(spiegazione(&s[0]).contains("30 secondi, conta i colpi"));
+        assert!(spiegazione(&s[2]).contains("tasto sinistro premuto"));
     }
 
     #[test]
@@ -801,9 +1069,10 @@ mod test {
 
     #[test]
     fn il_grafico_ha_spazio_sopra_il_massimo() {
-        assert_eq!(cima_grafico(&[], 0), 5);
-        assert_eq!(cima_grafico(&[10, 20], 18), 25);
-        assert_eq!(cima_grafico(&[10, 20], 40), 45);
-        assert!(cima_grafico(&[44], 0) > 44);
+        assert_eq!(cima_grafico(&[], 0.0, false), 5.0);
+        assert_eq!(cima_grafico(&[10.0, 20.0], 18.0, false), 25.0);
+        assert_eq!(cima_grafico(&[10.0, 20.0], 40.0, false), 45.0);
+        assert!(cima_grafico(&[44.0], 0.0, false) > 44.0);
+        assert_eq!(cima_grafico(&[97.5], 90.0, true), 100.0, "il tracking arriva al più a 100");
     }
 }

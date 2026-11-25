@@ -33,6 +33,7 @@ dependencies = [
  "egui-winit",
  "glam",
  "log",
+ "naga",
  "pollster",
  "serde",
  "serde_json",

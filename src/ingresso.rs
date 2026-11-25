@@ -7,7 +7,8 @@
 //!   "precisione del puntatore" di Windows. Ogni evento prende l'istante QPC in cui il thread lo riceve.
 //! - I count si sommano in contatori atomici; il ciclo dei frame li legge all'ultimo momento, subito prima di
 //!   calcolare la visuale. Ogni clic si mette in coda con l'istante e con i contatori di quel momento, così si
-//!   valuta con la visuale che c'era al clic, anche se il frame arriva dopo.
+//!   valuta con la visuale che c'era al clic, anche se il frame arriva dopo. Nella stessa coda va anche il tasto che
+//!   torna su: il tracking conta il tempo col tasto premuto.
 //! - Fuori dal giro la registrazione si toglie (`RIDEV_REMOVE`): nei menu il thread non si sveglia.
 //!
 //! Il tratto prima del thread (mouse, USB, driver, Windows) non si vede da qui: lo misura PresentMon.
@@ -24,8 +25,8 @@ use windows::Win32::UI::Input::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, HWND_MESSAGE, MSG, PostMessageW,
-    RI_MOUSE_LEFT_BUTTON_DOWN, RegisterClassExW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_INPUT,
-    WNDCLASSEXW,
+    RI_MOUSE_LEFT_BUTTON_DOWN, RI_MOUSE_LEFT_BUTTON_UP, RegisterClassExW, WINDOW_EX_STYLE, WINDOW_STYLE,
+    WM_APP, WM_INPUT, WNDCLASSEXW,
 };
 use windows::core::w;
 
@@ -34,12 +35,14 @@ use crate::tempo;
 const CAPACITA_CLIC: usize = 256;
 const WM_ATTIVA: u32 = WM_APP + 1;
 
-/// Un clic, con i contatori dei count nel suo istante.
+/// Il tasto sinistro che va giù (un clic) o torna su, con i contatori dei count nel suo istante. Il tasto su serve al
+/// tracking, che conta il tempo col tasto premuto.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Clic {
     pub qpc: i64,
     pub dx: i64,
     pub dy: i64,
+    pub giu: bool,
 }
 
 struct CodaClic {
@@ -158,7 +161,7 @@ impl Ingresso {
         n
     }
 
-    fn evento(&self, ora: i64, dx: i32, dy: i32, sinistro_giu: bool) {
+    fn evento(&self, ora: i64, dx: i32, dy: i32, sinistro_giu: bool, sinistro_su: bool) {
         if !self.attivo.load(Ordering::Relaxed) {
             return;
         }
@@ -169,17 +172,21 @@ impl Ingresso {
             let _ = self.primo_in_attesa.compare_exchange(0, ora, Ordering::AcqRel, Ordering::Relaxed);
             self.ultimo_in_attesa.store(ora, Ordering::Release);
         }
-        if sinistro_giu && let Ok(mut c) = self.clic.lock() {
-            if c.n < CAPACITA_CLIC {
-                let n = c.n;
-                c.voci[n] = Clic {
-                    qpc: ora,
-                    dx: self.dx.load(Ordering::Acquire),
-                    dy: self.dy.load(Ordering::Acquire),
-                };
-                c.n += 1;
-            } else {
-                self.clic_persi.fetch_add(1, Ordering::Relaxed);
+        // Giù e su nello stesso evento (succede col mouse simulato): prima giù, poi su.
+        for (vero, giu) in [(sinistro_giu, true), (sinistro_su, false)] {
+            if vero && let Ok(mut c) = self.clic.lock() {
+                if c.n < CAPACITA_CLIC {
+                    let n = c.n;
+                    c.voci[n] = Clic {
+                        qpc: ora,
+                        dx: self.dx.load(Ordering::Acquire),
+                        dy: self.dy.load(Ordering::Acquire),
+                        giu,
+                    };
+                    c.n += 1;
+                } else {
+                    self.clic_persi.fetch_add(1, Ordering::Relaxed);
+                }
             }
         }
     }
@@ -230,7 +237,13 @@ extern "system" fn procedura(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARA
                 } else {
                     (mouse.lLastX, mouse.lLastY)
                 };
-                i.evento(ora, dx, dy, pulsanti & RI_MOUSE_LEFT_BUTTON_DOWN != 0);
+                i.evento(
+                    ora,
+                    dx,
+                    dy,
+                    pulsanti & RI_MOUSE_LEFT_BUTTON_DOWN != 0,
+                    pulsanti & RI_MOUSE_LEFT_BUTTON_UP != 0,
+                );
             }
             // SAFETY: per WM_INPUT va chiamata DefWindowProc, che libera i dati dell'evento.
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }

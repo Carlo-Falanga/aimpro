@@ -1,14 +1,14 @@
-//! Il registro di un giro: per ogni bersaglio colpito il tempo fra la comparsa e il colpo, la distanza angolare dal
-//! bersaglio precedente e gli overshoot (il mirino entra nella sfera e ne esce senza colpirla).
+//! Il registro di un giro: per ogni bersaglio colpito il tempo dal colpo prima (con una sfera sola, dalla comparsa),
+//! la distanza angolare dal bersaglio colpito prima e gli overshoot (il mirino entra nella sfera e ne esce senza colpirla).
 //!
-//! Sta fuori da `giro.rs` e legge il giro solo dalla sua parte pubblica (bersaglio, colpi, riepilogo), così uno
-//! scenario nuovo lo riusa. Gira nel frame del giro: la memoria si prepara una volta sola (`Registro::new`), e
+//! Sta fuori da `giro.rs` e legge il giro solo dalla sua parte pubblica (sfera colpita, sfera guardata, riepilogo),
+//! così vale per ogni scenario. Gira nel frame del giro: la memoria si prepara una volta sola (`Registro::new`), e
 //! `inizia`, `clic` e `osserva` non allocano.
 
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
-use crate::camera::{avanti, colpisce_sfera};
+use crate::camera::avanti;
 use crate::giro::{Esito, Giro};
 
 /// Bersagli tenuti per giro: in 30 secondi sono un colpo ogni 29 ms; oltre si contano ma non si registrano.
@@ -30,10 +30,8 @@ pub struct Registro {
     bersagli: Vec<Bersaglio>,
     /// Colpi oltre `MASSIMO_BERSAGLI`, contati ma non registrati.
     persi: u32,
-    /// Direzione del bersaglio precedente (o della visuale di partenza).
+    /// Direzione del bersaglio colpito prima (o della visuale di partenza).
     precedente: DVec3,
-    /// Direzione del bersaglio in campo.
-    attuale: DVec3,
     dentro: bool,
     overshoot: u32,
     overshoot_totale: u32,
@@ -58,7 +56,6 @@ impl Registro {
             bersagli: Vec::with_capacity(MASSIMO_BERSAGLI),
             persi: 0,
             precedente: avanti(0.0, 0.0),
-            attuale: avanti(0.0, 0.0),
             dentro: false,
             overshoot: 0,
             overshoot_totale: 0,
@@ -75,7 +72,6 @@ impl Registro {
         self.bersagli.clear();
         self.persi = 0;
         self.precedente = d;
-        self.attuale = self.direzione(g.bersaglio);
         self.dentro = false;
         self.overshoot = 0;
         self.overshoot_totale = 0;
@@ -89,9 +85,10 @@ impl Registro {
             return;
         }
         let somma = somma_tempi(g);
+        let colpito = self.direzione(g.colpita());
         let b = Bersaglio {
             tempo_ms: (somma - self.somma_tempi).max(0.0),
-            distanza_gradi: angolo_gradi(self.precedente, self.attuale),
+            distanza_gradi: angolo_gradi(self.precedente, colpito),
             overshoot: self.overshoot,
         };
         if self.bersagli.len() < MASSIMO_BERSAGLI {
@@ -100,16 +97,18 @@ impl Registro {
             self.persi += 1;
         }
         self.somma_tempi = somma;
-        self.precedente = self.attuale;
-        self.attuale = self.direzione(g.bersaglio);
+        self.precedente = colpito;
         self.dentro = false;
         self.overshoot = 0;
     }
 
     /// A ogni frame, dopo i clic, con la direzione del mirino già calcolata: conta un overshoot quando il mirino
-    /// esce dalla sfera in cui era entrato.
+    /// esce dalla sfera in cui era entrato. Nel tracking stare sopra la sfera è il gioco: niente overshoot.
     pub fn osserva(&mut self, g: &Giro, d: DVec3) {
-        let dentro = colpisce_sfera(self.occhio, d, g.bersaglio, g.raggio());
+        if g.regole.tracking() {
+            return;
+        }
+        let dentro = g.guarda(d).is_some();
         if self.dentro && !dentro {
             self.overshoot += 1;
             self.overshoot_totale += 1;
@@ -135,12 +134,10 @@ impl Registro {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::giro::Caso;
-
-    const OCCHIO: DVec3 = DVec3::new(0.0, 1.7, 0.0);
+    use crate::giro::test::{OCCHIO, mira_a, partito};
 
     fn mira(g: &Giro) -> DVec3 {
-        (g.bersaglio - OCCHIO).normalize()
+        mira_a(g, 0)
     }
 
     /// Una direzione appena fuori dalla sfera (circa 3 gradi a lato del centro: il raggio ne copre 1,9).
@@ -150,8 +147,7 @@ mod test {
     }
 
     fn pronto(seme: u64) -> (Giro, Registro) {
-        let mut g = Giro::new(OCCHIO, Caso::new(seme));
-        g.inizia(0.0);
+        let g = partito("scatto", seme, 0.0);
         let mut r = Registro::new(OCCHIO);
         r.inizia(&g, avanti(0.0, 0.0));
         (g, r)
@@ -262,12 +258,38 @@ mod test {
         r.osserva(&g, accanto(&g));
         let d = mira(&g);
         clic(&mut g, &mut r, 100.0, d);
-        g.inizia(1000.0);
+        let mut g = partito("scatto", 8, 1000.0);
         r.inizia(&g, avanti(0.0, 0.0));
         assert!(r.bersagli().is_empty());
         assert_eq!(r.overshoot_totale(), 0);
         let d = mira(&g);
         clic(&mut g, &mut r, 1250.0, d);
         assert!((r.bersagli()[0].tempo_ms - 250.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn con_tre_sfere_la_distanza_e_fra_quelle_colpite() {
+        let mut g = partito("terna", 9, 0.0);
+        let mut r = Registro::new(OCCHIO);
+        r.inizia(&g, avanti(0.0, 0.0));
+        let (a, b) = (mira_a(&g, 0), mira_a(&g, 2));
+        clic(&mut g, &mut r, 300.0, a);
+        clic(&mut g, &mut r, 700.0, b);
+        let reg = r.bersagli();
+        let attesa = a.dot(b).clamp(-1.0, 1.0).acos().to_degrees();
+        assert!((reg[1].distanza_gradi - attesa).abs() < 1e-9);
+        assert!((reg[0].tempo_ms - 300.0).abs() < 1e-9 && (reg[1].tempo_ms - 400.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nel_tracking_niente_overshoot() {
+        let g = partito("filo", 10, 0.0);
+        let mut r = Registro::new(OCCHIO);
+        r.inizia(&g, avanti(0.0, 0.0));
+        for _ in 0..5 {
+            r.osserva(&g, mira(&g));
+            r.osserva(&g, -mira(&g));
+        }
+        assert_eq!(r.overshoot_totale(), 0);
     }
 }

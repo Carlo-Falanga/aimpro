@@ -22,6 +22,7 @@ mod latenza;
 mod misure;
 mod registro;
 mod rete;
+mod scenari;
 mod sensibilita;
 mod sistema;
 mod storico;

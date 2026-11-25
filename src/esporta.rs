@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use crate::storico::{GiroSalvato, Ora};
 
-const INTESTAZIONE: [&str; 16] = [
+const INTESTAZIONE: [&str; 20] = [
     "data",
     "scenario",
     "durata (s)",
@@ -25,6 +25,10 @@ const INTESTAZIONE: [&str; 16] = [
     "vsync",
     "limite fps",
     "versione",
+    "punteggio",
+    "sul bersaglio (%)",
+    "dimensione (%)",
+    "velocità (%)",
 ];
 
 /// Un numero con al più `cifre` decimali, senza zeri in coda, con la virgola.
@@ -74,6 +78,10 @@ pub fn csv(giri: &[GiroSalvato]) -> String {
             if i.vsync { "sì" } else { "no" }.to_string(),
             if i.limite_fps == 0 { "nessuno".to_string() } else { i.limite_fps.to_string() },
             campo(&i.versione),
+            decimale(g.punteggio(), 2),
+            g.tracking.map_or(String::new(), |t| decimale(t * 100.0, 1)),
+            decimale(g.parametri.dimensione * 100.0, 0),
+            decimale(g.parametri.velocita * 100.0, 0),
         ];
         s.push_str(&riga.join(";"));
         s.push_str("\r\n");
@@ -132,9 +140,10 @@ mod test {
         let righe: Vec<&str> = t.trim_start_matches('\u{feff}').split("\r\n").collect();
         assert_eq!(righe.len(), 4, "intestazione, due giri e la riga vuota finale: {righe:?}");
         assert_eq!(righe[3], "");
-        assert_eq!(righe[0].split(';').count(), 16);
+        assert_eq!(righe[0].split(';').count(), 20);
         let c: Vec<&str> = righe[1].split(';').collect();
-        assert_eq!(c.len(), 16);
+        assert_eq!(c.len(), 20);
+        assert_eq!(&c[16..], ["42", "", "100", "100"]);
         assert_eq!(c[0], "22/11/2026 14:03:05");
         assert_eq!(&c[1..6], ["scatto", "30", "42", "3", "93,3"]);
         assert_eq!(c[6], "702,3");
@@ -145,6 +154,15 @@ mod test {
         assert!(c[10].contains(','), "cm/360 con la virgola: {}", c[10]);
         let c: Vec<&str> = righe[2].split(';').collect();
         assert_eq!((c[5], c[6], c[13], c[14]), ("", "", "sì", "240"));
+        let mut t = giro_di_prova(0, 3);
+        t.scenario = "filo".into();
+        t.tracking = Some(0.735);
+        t.punteggio = Some(73.45);
+        t.parametri.velocita = 1.25;
+        let righe = csv(&[t]);
+        let riga = righe.trim_start_matches('\u{feff}').lines().nth(1).unwrap();
+        let c: Vec<&str> = riga.split(';').collect();
+        assert_eq!(&c[16..], ["73,45", "73,5", "100", "125"]);
     }
 
     #[test]

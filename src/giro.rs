@@ -1,23 +1,19 @@
-//! Il giro dello scenario "Scatto": una sfera alla volta in un punto a caso davanti al giocatore, 30 secondi
-//! (la durata standard degli scenari).
+//! Il giro di uno scenario: le sfere, il loro moto, i clic, il tracking, il conto alla rovescia e il tempo.
 //! Logica pura: i tempi (millisecondi) arrivano da fuori, dall'istante degli eventi, così si prova nei test.
+//! Nessuna allocazione: le sfere stanno in un vettore fisso di `MAX_SFERE`.
+//!
+//! Il tempo di gioco (`tg`) parte da 0 alla fine del conto alla rovescia e si ferma in pausa. Il moto di ogni sfera
+//! è un tratto: angoli di partenza, velocità angolare e istante `t0`; la posizione a un istante si calcola da lì, con
+//! il rimbalzo ai bordi della zona (`rifletti`). Lo shader fa lo stesso conto con gli stessi numeri, quindi il
+//! buffer delle sfere si riscrive solo quando un tratto cambia (sfera colpita, cambio di direzione), non a ogni frame.
 
 use glam::DVec3;
 
 use crate::camera::{avanti, colpisce_sfera};
+use crate::scenari::{MAX_SFERE, Regole, TipoMovimento};
 
-pub const DURATA_GIRO_MS: f64 = 30_000.0;
-
-/// Dove compaiono i bersagli, in angoli rispetto a chi guarda dritto davanti (-Z).
-pub mod zona {
-    pub const IMBARDATA_MAX: f64 = 40.0 * std::f64::consts::PI / 180.0;
-    pub const BECCHEGGIO_MIN: f64 = -10.0 * std::f64::consts::PI / 180.0;
-    pub const BECCHEGGIO_MAX: f64 = 20.0 * std::f64::consts::PI / 180.0;
-    /// Distanza angolare minima fra un bersaglio e il successivo.
-    pub const DISTANZA_MINIMA: f64 = 10.0 * std::f64::consts::PI / 180.0;
-    pub const DISTANZA: f64 = 12.0;
-    pub const RAGGIO: f64 = 0.4;
-}
+/// Il conto alla rovescia prima del giro.
+pub const CONTO_MS: f64 = 3000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Esito {
@@ -32,8 +28,18 @@ pub struct Riepilogo {
     pub errori: u32,
     /// Colpi su clic totali, fra 0 e 1; `None` senza clic.
     pub precisione: Option<f64>,
-    /// Media fra la comparsa di un bersaglio e il colpo; `None` senza colpi.
+    /// Media fra un colpo e il precedente (o la partenza); con una sfera sola è il tempo dalla comparsa. `None`
+    /// senza colpi.
     pub tempo_medio_ms: Option<f64>,
+    /// Negli scenari di tracking: la frazione del giro con il mirino sulla sfera e il tasto premuto.
+    pub tracking: Option<f64>,
+}
+
+impl Riepilogo {
+    /// Il punteggio del giro: i colpi, o la percentuale del tracking.
+    pub fn punteggio(&self) -> f64 {
+        self.tracking.map_or(f64::from(self.colpi), |t| t * 100.0)
+    }
 }
 
 /// Generatore di numeri a caso piccolo e senza allocazioni (xorshift64*); il seme viene da fuori.
@@ -56,9 +62,36 @@ impl Caso {
     }
 }
 
+/// `x` riportato in `[lo, hi]` come una palla che rimbalza ai bordi. Lo stesso conto sta in `scena.wgsl`.
+pub fn rifletti(x: f64, lo: f64, hi: f64) -> f64 {
+    let w = hi - lo;
+    if w <= 0.0 {
+        return lo;
+    }
+    let u = (x - lo).rem_euclid(2.0 * w);
+    if u <= w { lo + u } else { lo + 2.0 * w - u }
+}
+
+/// Il moto di una sfera da `t0` (ms di gioco): angoli di partenza e velocità in radianti al secondo.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Tratto {
+    pub imbardata: f64,
+    pub beccheggio: f64,
+    pub v_imbardata: f64,
+    pub v_beccheggio: f64,
+    pub t0: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Sfera {
+    tratto: Tratto,
+    /// Quando cambia direzione (ms di gioco), negli scenari a moto casuale.
+    cambio: f64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Giro {
-    pub bersaglio: DVec3,
+    pub regole: Regole,
     pub colpi: u32,
     pub errori: u32,
     pub finito: bool,
@@ -66,17 +99,31 @@ pub struct Giro {
     pub in_pausa: bool,
     occhio: DVec3,
     caso: Caso,
+    sfere: [Sfera; MAX_SFERE],
+    /// I centri all'ultimo `avanza`.
+    centri: [DVec3; MAX_SFERE],
+    /// Cresce a ogni tratto nuovo: chi disegna riscrive il buffer delle sfere solo quando cambia.
+    pub versione: u64,
+    /// Istante (ms) in cui parte il tempo di gioco; durante il conto alla rovescia è nel futuro. Si sposta in avanti
+    /// a ogni ripresa dalla pausa.
     inizio: f64,
     inizio_pausa: f64,
-    comparsa: f64,
+    /// Tempo di gioco dell'ultimo colpo (0 alla partenza).
+    ultimo_colpo: f64,
     somma_tempi: f64,
-    angoli: (f64, f64),
+    /// Il centro della sfera dell'ultimo colpo, all'istante del colpo.
+    colpita: DVec3,
+    /// Il tasto sinistro è giù (dal Raw Input, giù e su).
+    premuto: bool,
+    /// Fin dove è arrivato il conto del tracking (ms, come gli istanti degli eventi).
+    tracciato: f64,
+    sul_bersaglio_ms: f64,
 }
 
 impl Giro {
-    pub fn new(occhio: DVec3, caso: Caso) -> Self {
+    pub fn new(occhio: DVec3, caso: Caso, regole: Regole) -> Self {
         Giro {
-            bersaglio: occhio + DVec3::NEG_Z * zona::DISTANZA,
+            regole,
             colpi: 0,
             errori: 0,
             finito: false,
@@ -84,40 +131,97 @@ impl Giro {
             in_pausa: false,
             occhio,
             caso,
+            sfere: [Sfera::default(); MAX_SFERE],
+            centri: [occhio + DVec3::NEG_Z * regole.distanza; MAX_SFERE],
+            versione: 0,
             inizio: 0.0,
             inizio_pausa: 0.0,
-            comparsa: 0.0,
+            ultimo_colpo: 0.0,
             somma_tempi: 0.0,
-            angoli: (0.0, 0.0),
+            colpita: occhio,
+            premuto: false,
+            tracciato: 0.0,
+            sul_bersaglio_ms: 0.0,
         }
     }
 
-    pub fn raggio(&self) -> f64 {
-        zona::RAGGIO
+    pub fn durata_ms(&self) -> f64 {
+        self.regole.durata_ms
     }
 
+    #[cfg(test)]
+    pub fn raggio(&self) -> f64 {
+        self.regole.raggio
+    }
+
+    pub fn n_sfere(&self) -> usize {
+        self.regole.sfere
+    }
+
+    #[cfg(test)]
+    pub fn centro(&self, i: usize) -> DVec3 {
+        self.centri[i]
+    }
+
+    pub fn tratto(&self, i: usize) -> Tratto {
+        self.sfere[i].tratto
+    }
+
+    /// Il giro parte con il conto alla rovescia: il tempo di gioco comincia fra `CONTO_MS`.
     pub fn inizia(&mut self, t: f64) {
         self.colpi = 0;
         self.errori = 0;
         self.somma_tempi = 0.0;
+        self.ultimo_colpo = 0.0;
+        self.sul_bersaglio_ms = 0.0;
         self.finito = false;
         self.in_corso = true;
         self.in_pausa = false;
-        self.inizio = t;
-        self.nuovo_bersaglio(t, true);
+        self.inizio = t + CONTO_MS;
+        self.tracciato = t;
+        self.colpita = self.occhio;
+        for i in 0..self.regole.sfere {
+            self.nuova_sfera(i, 0.0, true);
+        }
+        self.avanza(t);
+    }
+
+    /// Il conto alla rovescia è in corso all'istante `t`?
+    pub fn nel_conto(&self, t: f64) -> bool {
+        self.in_corso && !self.in_pausa && t < self.inizio
+    }
+
+    /// I secondi del conto alla rovescia da mostrare (3, 2, 1), se è in corso.
+    pub fn conto(&self, t: f64) -> Option<u32> {
+        let adesso = if self.in_pausa { self.inizio_pausa } else { t };
+        (self.in_corso && adesso < self.inizio)
+            .then(|| ((self.inizio - adesso) / 1000.0).ceil().max(1.0) as u32)
+    }
+
+    /// Salta il conto alla rovescia: il giro parte adesso.
+    pub fn salta_conto(&mut self, t: f64) {
+        if self.nel_conto(t) {
+            self.inizio = t;
+            self.avanza(t);
+        }
+    }
+
+    /// Il tempo di gioco all'istante `t` (fermo in pausa, 0 durante il conto alla rovescia).
+    pub fn tempo_di_gioco(&self, t: f64) -> f64 {
+        let adesso = if self.in_pausa { self.inizio_pausa } else { t };
+        (adesso - self.inizio).clamp(0.0, self.regole.durata_ms)
     }
 
     pub fn restante_ms(&self, t: f64) -> f64 {
         if !self.in_corso && !self.finito {
-            return DURATA_GIRO_MS;
+            return self.regole.durata_ms;
         }
-        let adesso = if self.in_pausa { self.inizio_pausa } else { t };
-        (DURATA_GIRO_MS - (adesso - self.inizio)).clamp(0.0, DURATA_GIRO_MS)
+        self.regole.durata_ms - self.tempo_di_gioco(t)
     }
 
     /// Va chiamata a ogni frame: dice `true` quando il giro è finito.
     pub fn aggiorna(&mut self, t: f64) -> bool {
-        if self.in_corso && !self.in_pausa && t - self.inizio >= DURATA_GIRO_MS {
+        if self.in_corso && !self.in_pausa && t - self.inizio >= self.regole.durata_ms {
             self.in_corso = false;
             self.finito = true;
         }
@@ -133,10 +237,11 @@ impl Giro {
 
     pub fn riprendi(&mut self, t: f64) {
         if self.in_pausa {
-            let ferma = t - self.inizio_pausa;
-            self.inizio += ferma;
-            self.comparsa += ferma;
+            self.inizio += t - self.inizio_pausa;
             self.in_pausa = false;
+            // In pausa il Raw Input è spento: lo stato del tasto non si sa, si riparte col tasto su.
+            self.premuto = false;
+            self.tracciato = t;
         }
     }
 
@@ -147,68 +252,236 @@ impl Giro {
         self.finito = false;
     }
 
-    /// Un clic all'istante `t` (quello dell'evento) guardando nella direzione `d` (versore).
-    pub fn clic(&mut self, t: f64, d: DVec3) -> Esito {
-        if !self.in_corso || self.in_pausa || t < self.inizio || t - self.inizio >= DURATA_GIRO_MS {
+    /// Porta il moto delle sfere all'istante `t` (cambi di direzione compresi) e ne calcola i centri.
+    pub fn avanza(&mut self, t: f64) {
+        let tg = self.tempo_di_gioco(t);
+        if self.regole.movimento == TipoMovimento::Casuale {
+            for i in 0..self.regole.sfere {
+                // Al più qualche cambio per frame; un frame lunghissimo non fa girare il ciclo all'infinito.
+                for _ in 0..16 {
+                    if tg < self.sfere[i].cambio {
+                        break;
+                    }
+                    self.cambia_direzione(i, self.sfere[i].cambio);
+                }
+            }
+        }
+        for i in 0..self.regole.sfere {
+            self.centri[i] = self.centro_a(i, tg);
+        }
+    }
+
+    /// Gli angoli della sfera `i` al tempo di gioco `tg`.
+    fn angoli_a(&self, i: usize, tg: f64) -> (f64, f64) {
+        let m = self.sfere[i].tratto;
+        let r = &self.regole;
+        let dt = (tg - m.t0) / 1000.0;
+        (
+            rifletti(m.imbardata + m.v_imbardata * dt, -r.imbardata_max, r.imbardata_max),
+            rifletti(m.beccheggio + m.v_beccheggio * dt, r.beccheggio_min, r.beccheggio_max),
+        )
+    }
+
+    fn centro_a(&self, i: usize, tg: f64) -> DVec3 {
+        let (imb, bec) = self.angoli_a(i, tg);
+        self.occhio + avanti(imb, bec) * self.regole.distanza
+    }
+
+    /// La sfera che il raggio dall'occhio in direzione `d` tocca, con i centri dell'ultimo `avanza`; se ne tocca più
+    /// d'una, quella col centro più vicino alla direzione.
+    pub fn guarda(&self, d: DVec3) -> Option<usize> {
+        let mut scelta = None;
+        let mut migliore = f64::NEG_INFINITY;
+        for i in 0..self.regole.sfere {
+            let c = self.centri[i];
+            if colpisce_sfera(self.occhio, d, c, self.regole.raggio) {
+                let coseno = (c - self.occhio).normalize_or_zero().dot(d);
+                if coseno > migliore {
+                    migliore = coseno;
+                    scelta = Some(i);
+                }
+            }
+        }
+        scelta
+    }
+
+    /// Il centro della sfera dell'ultimo colpo, all'istante del colpo.
+    pub fn colpita(&self) -> DVec3 {
+        self.colpita
+    }
+
+    /// Il tasto sinistro all'istante `t` (giù o su), guardando nella direzione `d`. Il tasto giù è un clic; durante il
+    /// conto alla rovescia lo salta e non conta.
+    pub fn tasto(&mut self, t: f64, giu: bool, d: DVec3) -> Esito {
+        self.traccia(t, d);
+        self.premuto = giu;
+        if !giu {
             return Esito::Ignorato;
         }
-        if colpisce_sfera(self.occhio, d, self.bersaglio, zona::RAGGIO) {
-            self.colpi += 1;
-            self.somma_tempi += t - self.comparsa;
-            self.nuovo_bersaglio(t, false);
-            Esito::Colpo
-        } else {
-            self.errori += 1;
-            Esito::Errore
+        if self.nel_conto(t) {
+            self.salta_conto(t);
+            return Esito::Ignorato;
         }
+        self.clic(t, d)
+    }
+
+    /// Un clic all'istante `t` (quello dell'evento) guardando nella direzione `d` (versore), con le sfere dove sono a
+    /// quell'istante. Negli scenari di tracking i clic non contano.
+    pub fn clic(&mut self, t: f64, d: DVec3) -> Esito {
+        if !self.in_corso
+            || self.in_pausa
+            || self.regole.tracking()
+            || t < self.inizio
+            || t - self.inizio >= self.regole.durata_ms
+        {
+            return Esito::Ignorato;
+        }
+        self.avanza(t);
+        let tg = self.tempo_di_gioco(t);
+        match self.guarda(d) {
+            Some(i) => {
+                self.colpi += 1;
+                self.somma_tempi += tg - self.ultimo_colpo;
+                self.ultimo_colpo = tg;
+                self.colpita = self.centri[i];
+                self.nuova_sfera(i, tg, false);
+                self.centri[i] = self.centro_a(i, tg);
+                Esito::Colpo
+            }
+            None => {
+                self.errori += 1;
+                Esito::Errore
+            }
+        }
+    }
+
+    /// Il tracking fino all'istante `t`, con il mirino in direzione `d`: il tratto da dove era arrivato conta se il
+    /// tasto era giù e, a `t`, il mirino è sulla sfera. Si chiama a ogni evento del tasto e a ogni frame.
+    pub fn traccia(&mut self, t: f64, d: DVec3) {
+        if !self.regole.tracking() || !self.in_corso || self.in_pausa {
+            return;
+        }
+        let da = self.tracciato.max(self.inizio);
+        let a = t.min(self.inizio + self.regole.durata_ms);
+        if self.premuto && a > da {
+            self.avanza(a);
+            if self.guarda(d).is_some() {
+                self.sul_bersaglio_ms += a - da;
+            }
+        }
+        self.tracciato = self.tracciato.max(t);
     }
 
     pub fn riepilogo(&self) -> Riepilogo {
         let clic = self.colpi + self.errori;
+        let tracking = self.regole.tracking();
         Riepilogo {
             colpi: self.colpi,
             errori: self.errori,
-            precisione: (clic > 0).then(|| f64::from(self.colpi) / f64::from(clic)),
+            precisione: (!tracking && clic > 0).then(|| f64::from(self.colpi) / f64::from(clic)),
             tempo_medio_ms: (self.colpi > 0).then(|| self.somma_tempi / f64::from(self.colpi)),
+            tracking: tracking.then(|| (self.sul_bersaglio_ms / self.regole.durata_ms).clamp(0.0, 1.0)),
         }
     }
 
-    /// Imbardata e beccheggio del bersaglio visto dall'occhio (per i test).
-    #[cfg(test)]
-    pub fn angoli_bersaglio(&self) -> (f64, f64) {
-        self.angoli
-    }
-
-    fn nuovo_bersaglio(&mut self, t: f64, primo: bool) {
-        let vecchia = avanti(self.angoli.0, self.angoli.1);
-        let mut scelta = self.angoli;
+    /// Una sfera nuova al posto della `i`, lontana dalle altre e (se non è la prima) da dove era; con il suo moto.
+    fn nuova_sfera(&mut self, i: usize, tg: f64, primo: bool) {
+        let r = self.regole;
+        let vecchia = self.angoli_a(i, tg);
+        let mut scelta = vecchia;
         for _ in 0..64 {
-            let imb = (self.caso.prossimo() * 2.0 - 1.0) * zona::IMBARDATA_MAX;
-            let bec =
-                zona::BECCHEGGIO_MIN + self.caso.prossimo() * (zona::BECCHEGGIO_MAX - zona::BECCHEGGIO_MIN);
+            let imb = (self.caso.prossimo() * 2.0 - 1.0) * r.imbardata_max;
+            let bec = r.beccheggio_min + self.caso.prossimo() * (r.beccheggio_max - r.beccheggio_min);
             scelta = (imb, bec);
-            if primo || avanti(imb, bec).dot(vecchia) <= zona::DISTANZA_MINIMA.cos() {
+            let dir = avanti(imb, bec);
+            let minimo = r.distanza_minima.cos();
+            let lontana_da_dove_era = primo || dir.dot(avanti(vecchia.0, vecchia.1)) <= minimo;
+            // Le altre sfere: quelle già messe (alla partenza si mettono in ordine).
+            let altre = if primo { i } else { r.sfere };
+            let lontana_dalle_altre = (0..altre).filter(|&j| j != i).all(|j| {
+                let (a, b) = self.angoli_a(j, tg);
+                dir.dot(avanti(a, b)) <= minimo
+            });
+            if lontana_da_dove_era && lontana_dalle_altre {
                 break;
             }
         }
-        self.angoli = scelta;
-        self.bersaglio = self.occhio + avanti(scelta.0, scelta.1) * zona::DISTANZA;
-        self.comparsa = t;
+        let mut tratto = Tratto { imbardata: scelta.0, beccheggio: scelta.1, t0: tg, ..Tratto::default() };
+        if r.movimento != TipoMovimento::Fermo {
+            let direzione = self.caso.prossimo() * std::f64::consts::TAU;
+            tratto.v_imbardata = r.velocita * direzione.cos();
+            tratto.v_beccheggio = r.velocita * direzione.sin();
+        }
+        self.sfere[i].tratto = tratto;
+        self.sfere[i].cambio = tg + self.intervallo_cambio();
+        self.versione += 1;
+    }
+
+    fn intervallo_cambio(&mut self) -> f64 {
+        let r = self.regole;
+        if r.movimento != TipoMovimento::Casuale {
+            return f64::INFINITY;
+        }
+        r.cambio_min_ms + self.caso.prossimo() * (r.cambio_max_ms - r.cambio_min_ms)
+    }
+
+    /// Al tempo di gioco `tg` la sfera `i` gira di colpo: fra 60 e 300 gradi rispetto a dove stava andando.
+    fn cambia_direzione(&mut self, i: usize, tg: f64) {
+        let r = self.regole;
+        let (imb, bec) = self.angoli_a(i, tg);
+        // La direzione in cui andava davvero, dopo i rimbalzi: la si ricava da due istanti vicini.
+        let (imb2, bec2) = self.angoli_a(i, tg + 1.0);
+        let attuale = (bec2 - bec).atan2(imb2 - imb);
+        let svolta = (60.0 + self.caso.prossimo() * 240.0).to_radians();
+        let direzione = attuale + svolta;
+        self.sfere[i].tratto = Tratto {
+            imbardata: imb,
+            beccheggio: bec,
+            v_imbardata: r.velocita * direzione.cos(),
+            v_beccheggio: r.velocita * direzione.sin(),
+            t0: tg,
+        };
+        self.sfere[i].cambio = tg + self.intervallo_cambio();
+        self.versione += 1;
+    }
+
+    /// Imbardata e beccheggio della sfera `i` visti dall'occhio, all'ultimo `avanza` (per i test).
+    #[cfg(test)]
+    pub fn angoli_sfera(&self, i: usize) -> (f64, f64) {
+        let d = (self.centri[i] - self.occhio).normalize();
+        (d.x.atan2(-d.z), d.y.asin())
     }
 }
 
 #[cfg(test)]
-mod test {
+pub mod test {
     use super::*;
+    use crate::scenari::{Parametri, Regole, di_aimpro};
 
-    const OCCHIO: DVec3 = DVec3::new(0.0, 1.7, 0.0);
+    pub const OCCHIO: DVec3 = DVec3::new(0.0, 1.7, 0.0);
+
+    pub fn regole(id: &str) -> Regole {
+        di_aimpro().into_iter().find(|s| s.id == id).unwrap().regole
+    }
+
+    /// Un giro dello scenario `id` partito a `t`, senza conto alla rovescia.
+    pub fn partito(id: &str, seme: u64, t: f64) -> Giro {
+        let mut g = Giro::new(OCCHIO, Caso::new(seme), regole(id));
+        g.inizia(t - CONTO_MS);
+        g.avanza(t);
+        g
+    }
 
     fn giro(seme: u64) -> Giro {
-        Giro::new(OCCHIO, Caso::new(seme))
+        partito("scatto", seme, 0.0)
+    }
+
+    pub fn mira_a(g: &Giro, i: usize) -> DVec3 {
+        (g.centro(i) - OCCHIO).normalize()
     }
 
     fn mira(g: &Giro) -> DVec3 {
-        (g.bersaglio - OCCHIO).normalize()
+        mira_a(g, 0)
     }
 
     fn lontano(g: &Giro) -> DVec3 {
@@ -217,48 +490,46 @@ mod test {
 
     #[test]
     fn dura_30_secondi() {
-        assert_eq!(DURATA_GIRO_MS, 30_000.0);
+        assert_eq!(giro(1).durata_ms(), 30_000.0);
     }
 
     #[test]
     fn un_colpo_conta_e_il_bersaglio_si_sposta() {
-        let mut g = giro(1);
-        g.inizia(1000.0);
-        let prima = g.bersaglio;
+        let mut g = partito("scatto", 1, 1000.0);
+        let prima = g.centro(0);
         assert_eq!(g.clic(1500.0, mira(&g)), Esito::Colpo);
         assert_eq!(g.colpi, 1);
-        assert_ne!(g.bersaglio, prima);
+        assert_ne!(g.centro(0), prima);
+        assert_eq!(g.colpita(), prima);
     }
 
     #[test]
     fn un_clic_a_vuoto_e_un_errore_e_il_bersaglio_resta() {
         let mut g = giro(2);
-        g.inizia(0.0);
-        let prima = g.bersaglio;
+        let prima = g.centro(0);
         assert_eq!(g.clic(100.0, lontano(&g)), Esito::Errore);
         assert_eq!(g.errori, 1);
-        assert_eq!(g.bersaglio, prima);
+        assert_eq!(g.centro(0), prima);
     }
 
     #[test]
     fn bersagli_nella_zona_e_lontani_dal_precedente() {
         let mut g = giro(3);
-        g.inizia(0.0);
+        let r = g.regole;
         for i in 0..2000 {
-            let (imb, bec) = g.angoli_bersaglio();
-            assert!(imb.abs() <= zona::IMBARDATA_MAX + 1e-12);
-            assert!((zona::BECCHEGGIO_MIN - 1e-12..=zona::BECCHEGGIO_MAX + 1e-12).contains(&bec));
+            let (imb, bec) = g.angoli_sfera(0);
+            assert!(imb.abs() <= r.imbardata_max + 1e-9);
+            assert!((r.beccheggio_min - 1e-9..=r.beccheggio_max + 1e-9).contains(&bec));
             let prima = mira(&g);
             assert_eq!(g.clic(f64::from(i) + 1.0, prima), Esito::Colpo);
             let angolo = prima.dot(mira(&g)).min(1.0).acos();
-            assert!(angolo >= zona::DISTANZA_MINIMA - 1e-9, "solo {angolo} rad dal precedente");
+            assert!(angolo >= r.distanza_minima - 1e-9, "solo {angolo} rad dal precedente");
         }
     }
 
     #[test]
     fn finisce_a_30_secondi_e_dopo_i_clic_non_contano() {
-        let mut g = giro(4);
-        g.inizia(1000.0);
+        let mut g = partito("scatto", 4, 1000.0);
         assert!(!g.aggiorna(30_999.0));
         assert!(g.aggiorna(31_000.0));
         assert_eq!(g.clic(31_001.0, mira(&g)), Esito::Ignorato);
@@ -268,7 +539,6 @@ mod test {
     #[test]
     fn conta_l_istante_dell_evento() {
         let mut g = giro(5);
-        g.inizia(0.0);
         assert_eq!(g.clic(29_999.0, mira(&g)), Esito::Colpo);
         assert_eq!(g.clic(30_000.0, mira(&g)), Esito::Ignorato);
         assert_eq!(g.clic(-1.0, mira(&g)), Esito::Ignorato);
@@ -277,7 +547,6 @@ mod test {
     #[test]
     fn riepilogo_coerente_con_i_clic() {
         let mut g = giro(6);
-        g.inizia(0.0);
         g.clic(400.0, mira(&g)); // bersaglio 1 in 400 ms
         g.clic(500.0, lontano(&g));
         g.clic(900.0, mira(&g)); // bersaglio 2 in 500 ms
@@ -289,12 +558,12 @@ mod test {
         assert_eq!((r.colpi, r.errori), (3, 3));
         assert!((r.precisione.unwrap() - 0.5).abs() < 1e-12);
         assert!((r.tempo_medio_ms.unwrap() - 500.0).abs() < 1e-9);
+        assert_eq!((r.tracking, r.punteggio()), (None, 3.0));
     }
 
     #[test]
     fn senza_clic_niente_precisione_ne_tempo() {
         let mut g = giro(7);
-        g.inizia(0.0);
         g.aggiorna(30_000.0);
         let r = g.riepilogo();
         assert_eq!(r.precisione, None);
@@ -304,7 +573,6 @@ mod test {
     #[test]
     fn la_pausa_ferma_il_tempo() {
         let mut g = giro(8);
-        g.inizia(0.0);
         g.pausa(10_000.0);
         assert_eq!(g.clic(20_000.0, mira(&g)), Esito::Ignorato);
         g.riprendi(40_000.0);
@@ -318,7 +586,6 @@ mod test {
     #[test]
     fn rigiocare_azzera() {
         let mut g = giro(9);
-        g.inizia(0.0);
         g.clic(100.0, mira(&g));
         g.clic(200.0, lontano(&g));
         g.aggiorna(30_000.0);
@@ -330,7 +597,6 @@ mod test {
     #[test]
     fn uscire_a_meta() {
         let mut g = giro(10);
-        g.inizia(0.0);
         g.annulla();
         assert!(!g.in_corso && !g.finito);
         assert_eq!(g.clic(10.0, mira(&g)), Esito::Ignorato);
@@ -339,8 +605,7 @@ mod test {
     #[test]
     fn il_bersaglio_si_colpisce_guardando_nei_suoi_angoli() {
         let mut g = giro(11);
-        g.inizia(0.0);
-        let (imb, bec) = g.angoli_bersaglio();
+        let (imb, bec) = g.angoli_sfera(0);
         assert_eq!(g.clic(1.0, avanti(imb, bec)), Esito::Colpo);
     }
 
@@ -351,5 +616,339 @@ mod test {
             let v = c.prossimo();
             assert!((0.0..1.0).contains(&v));
         }
+    }
+
+    // ------------------------------------------------------------ conto alla rovescia
+
+    #[test]
+    fn il_conto_alla_rovescia_dura_3_secondi_e_poi_parte_il_giro() {
+        let mut g = Giro::new(OCCHIO, Caso::new(12), regole("scatto"));
+        g.inizia(1000.0);
+        assert_eq!(g.conto(1000.0), Some(3));
+        assert_eq!(g.conto(2500.0), Some(2));
+        assert_eq!(g.conto(3999.0), Some(1));
+        assert_eq!(g.conto(4000.0), None);
+        assert_eq!(g.restante_ms(2000.0), 30_000.0, "il tempo del giro non scorre durante il conto");
+        assert!(!g.aggiorna(33_999.0));
+        assert!(g.aggiorna(34_000.0));
+    }
+
+    #[test]
+    fn un_clic_salta_il_conto_e_non_conta() {
+        let mut g = Giro::new(OCCHIO, Caso::new(13), regole("scatto"));
+        g.inizia(0.0);
+        let d = mira(&g);
+        assert_eq!(g.tasto(500.0, true, d), Esito::Ignorato, "il clic che salta il conto non è un colpo");
+        assert_eq!(g.conto(500.0), None);
+        assert_eq!((g.colpi, g.errori), (0, 0));
+        assert_eq!(g.restante_ms(500.0), 30_000.0);
+        g.tasto(510.0, false, d);
+        assert_eq!(g.tasto(600.0, true, d), Esito::Colpo, "dopo, i clic contano");
+        assert!(g.aggiorna(30_500.0));
+    }
+
+    #[test]
+    fn saltare_il_conto_da_tastiera() {
+        let mut g = Giro::new(OCCHIO, Caso::new(14), regole("scatto"));
+        g.inizia(0.0);
+        g.salta_conto(1200.0);
+        assert_eq!(g.conto(1200.0), None);
+        assert_eq!(g.clic(1300.0, mira(&g)), Esito::Colpo);
+        assert!(g.aggiorna(31_200.0));
+    }
+
+    #[test]
+    fn la_pausa_nel_conto_lo_ferma() {
+        let mut g = Giro::new(OCCHIO, Caso::new(15), regole("scatto"));
+        g.inizia(0.0);
+        g.pausa(1000.0);
+        assert_eq!(g.conto(5000.0), Some(2));
+        g.riprendi(9000.0);
+        assert_eq!(g.conto(9000.0), Some(2));
+        assert_eq!(g.conto(11_000.0), None);
+    }
+
+    // ------------------------------------------------------------ moto
+
+    #[test]
+    fn rifletti_rimbalza_ai_bordi() {
+        assert_eq!(rifletti(0.5, 0.0, 1.0), 0.5);
+        assert!((rifletti(1.25, 0.0, 1.0) - 0.75).abs() < 1e-12);
+        assert!((rifletti(-0.25, 0.0, 1.0) - 0.25).abs() < 1e-12);
+        assert!((rifletti(2.5, 0.0, 1.0) - 0.5).abs() < 1e-12);
+        assert!((rifletti(-3.0, -1.0, 1.0) - 1.0).abs() < 1e-12);
+        assert_eq!(rifletti(5.0, 2.0, 2.0), 2.0);
+    }
+
+    fn velocita_angolare(g: &mut Giro, i: usize, t: f64) -> f64 {
+        g.avanza(t);
+        let a = mira_a(g, i);
+        g.avanza(t + 10.0);
+        let b = mira_a(g, i);
+        a.dot(b).clamp(-1.0, 1.0).acos() / 0.010
+    }
+
+    #[test]
+    fn nelle_zone_e_alla_velocita_dello_scenario() {
+        for id in ["deriva", "filo", "guizzo", "sciame"] {
+            let mut g = partito(id, 16, 0.0);
+            let r = g.regole;
+            for passo in 0..3000 {
+                let t = f64::from(passo) * 10.0;
+                g.avanza(t);
+                for i in 0..r.sfere {
+                    let (imb, bec) = g.angoli_sfera(i);
+                    assert!(imb.abs() <= r.imbardata_max + 1e-9, "{id}: imbardata {imb}");
+                    assert!(
+                        (r.beccheggio_min - 1e-9..=r.beccheggio_max + 1e-9).contains(&bec),
+                        "{id}: {bec}"
+                    );
+                }
+            }
+            // Lontano dai rimbalzi la velocità sullo schermo è quella dello scenario (a meno del coseno del
+            // beccheggio, piccolo nella zona).
+            let v = velocita_angolare(&mut g, 0, 5.0);
+            assert!(v <= r.velocita * 1.01 && v >= r.velocita * 0.9, "{id}: {v} contro {}", r.velocita);
+        }
+    }
+
+    #[test]
+    fn le_sfere_ferme_non_si_muovono() {
+        let mut g = partito("terna", 17, 0.0);
+        let prima: Vec<DVec3> = (0..3).map(|i| g.centro(i)).collect();
+        g.avanza(20_000.0);
+        assert_eq!((0..3).map(|i| g.centro(i)).collect::<Vec<_>>(), prima);
+        assert_eq!(g.versione, 3, "un tratto per sfera, nessun cambio");
+    }
+
+    #[test]
+    fn il_moto_casuale_cambia_direzione_agli_intervalli_dello_scenario() {
+        let mut g = partito("guizzo", 18, 0.0);
+        let r = g.regole;
+        let mut cambi = 0;
+        let mut v = g.versione;
+        let mut direzione_prima = None;
+        for passo in 1..=30_000 {
+            g.avanza(f64::from(passo));
+            if g.versione != v {
+                v = g.versione;
+                cambi += 1;
+                let m = g.tratto(0);
+                let d = m.v_beccheggio.atan2(m.v_imbardata);
+                direzione_prima = Some(d);
+            }
+        }
+        assert!(direzione_prima.is_some());
+        let attesi = r.durata_ms / ((r.cambio_min_ms + r.cambio_max_ms) / 2.0);
+        assert!(
+            (attesi * 0.7..attesi * 1.3).contains(&f64::from(cambi)),
+            "{cambi} cambi, attesi circa {attesi}"
+        );
+    }
+
+    #[test]
+    fn il_moto_e_continuo_anche_ai_cambi_di_direzione() {
+        let mut g = partito("guizzo", 19, 0.0);
+        let mut prima = mira_a(&g, 0);
+        let massimo = g.regole.velocita * 0.001 * 1.05;
+        for passo in 1..=30_000 {
+            g.avanza(f64::from(passo));
+            let ora = mira_a(&g, 0);
+            let salto = prima.dot(ora).clamp(-1.0, 1.0).acos();
+            assert!(salto <= massimo, "salto di {salto} rad al ms {passo}");
+            prima = ora;
+        }
+    }
+
+    #[test]
+    fn la_velocita_segue_il_parametro() {
+        let base = regole("deriva");
+        let mut g = Giro::new(OCCHIO, Caso::new(20), base.con(Parametri { dimensione: 1.0, velocita: 2.0 }));
+        g.inizia(-CONTO_MS);
+        let v = velocita_angolare(&mut g, 0, 5.0);
+        assert!((v / base.velocita - 2.0).abs() < 0.2, "{v}");
+    }
+
+    // ------------------------------------------------------------ più sfere
+
+    #[test]
+    fn tre_sfere_lontane_fra_loro() {
+        for seme in 0..50 {
+            let g = partito("terna", seme, 0.0);
+            let min = g.regole.distanza_minima;
+            for a in 0..3 {
+                for b in (a + 1)..3 {
+                    let angolo = mira_a(&g, a).dot(mira_a(&g, b)).clamp(-1.0, 1.0).acos();
+                    assert!(angolo >= min - 1e-9, "seme {seme}: {a} e {b} a {angolo} rad");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn con_tre_sfere_ferme_il_clic_colpisce_quella_guardata() {
+        let mut g = partito("terna", 21, 0.0);
+        for k in 0..300 {
+            let i = k % 3;
+            let altre: Vec<DVec3> = (0..3).filter(|&j| j != i).map(|j| g.centro(j)).collect();
+            let prima = g.centro(i);
+            assert_eq!(g.clic(f64::from(k as u32) * 10.0 + 1.0, mira_a(&g, i)), Esito::Colpo);
+            assert_eq!(g.colpita(), prima, "colpita quella guardata");
+            assert_ne!(g.centro(i), prima, "rinasce altrove");
+            let ora: Vec<DVec3> = (0..3).filter(|&j| j != i).map(|j| g.centro(j)).collect();
+            assert_eq!(ora, altre, "le altre restano dove sono");
+            let min = g.regole.distanza_minima;
+            for j in (0..3).filter(|&j| j != i) {
+                let angolo = mira_a(&g, i).dot(mira_a(&g, j)).clamp(-1.0, 1.0).acos();
+                assert!(angolo >= min - 1e-9);
+            }
+        }
+        assert_eq!(g.colpi, 300);
+    }
+
+    #[test]
+    fn con_tre_sfere_in_movimento_conta_la_visuale_dell_istante_del_clic() {
+        let mut g = partito("sciame", 22, 0.0);
+        // Dove sarà la sfera 1 a 1234 ms: si mira lì, il frame dopo (a 1250 ms) è già spostata.
+        g.avanza(1234.0);
+        let al_clic = mira_a(&g, 1);
+        let centro_al_clic = g.centro(1);
+        g.avanza(1250.0);
+        let al_frame = mira_a(&g, 1);
+        assert!(al_clic.dot(al_frame) < 1.0 - 1e-9, "la sfera si è mossa");
+        assert_eq!(g.clic(1234.0, al_clic), Esito::Colpo);
+        assert_eq!(g.colpita(), centro_al_clic);
+        // Con la visuale del frame, a un istante di molto prima, la stessa sfera non si colpisce più.
+        let mut h = partito("sciame", 22, 0.0);
+        h.avanza(200.0);
+        let lontana = mira_a(&h, 1);
+        let mut k = partito("sciame", 22, 0.0);
+        let r = k.regole.raggio / k.regole.distanza;
+        if lontana.dot(al_clic).clamp(-1.0, 1.0).acos() > 2.0 * r {
+            assert_ne!(k.clic(1234.0, lontana), Esito::Colpo);
+        }
+    }
+
+    #[test]
+    fn la_dimensione_cambia_il_raggio() {
+        let base = regole("scatto");
+        let g = Giro::new(OCCHIO, Caso::new(23), base.con(Parametri { dimensione: 1.5, velocita: 1.0 }));
+        assert!((g.raggio() - 0.6).abs() < 1e-12);
+    }
+
+    // ------------------------------------------------------------ tracking
+
+    /// Un giro di tracking da 0 a 30 s a passi di 1 ms: `mira(t)` dice se a `t` il mirino è sulla sfera, `giu(t)` se
+    /// il tasto è giù. Gli eventi del tasto si mandano quando cambia, come fa il Raw Input.
+    fn tracking(id: &str, mira: impl Fn(f64) -> bool, giu: impl Fn(f64) -> bool) -> f64 {
+        let mut g = partito(id, 24, 0.0);
+        let mut tasto = false;
+        for passo in 0..=30_000 {
+            let t = f64::from(passo);
+            g.avanza(t);
+            let d = if mira(t) { mira_a(&g, 0) } else { -mira_a(&g, 0) };
+            if giu(t) != tasto {
+                tasto = giu(t);
+                g.tasto(t, tasto, d);
+            }
+            g.traccia(t, d);
+            g.aggiorna(t);
+        }
+        assert!(g.finito);
+        g.riepilogo().tracking.unwrap()
+    }
+
+    #[test]
+    fn tracking_sempre_sopra_e_premuto_e_il_100_per_cento() {
+        for id in ["filo", "guizzo"] {
+            let p = tracking(id, |_| true, |_| true);
+            assert!((p - 1.0).abs() < 1e-3, "{id}: {p}");
+        }
+    }
+
+    #[test]
+    fn tracking_sopra_ma_senza_tasto_non_conta() {
+        assert_eq!(tracking("filo", |_| true, |_| false), 0.0);
+    }
+
+    #[test]
+    fn tracking_col_tasto_ma_fuori_non_conta() {
+        assert_eq!(tracking("guizzo", |_| false, |_| true), 0.0);
+    }
+
+    #[test]
+    fn tracking_meta_tempo_sopra_e_tasto_sempre_giu_e_il_50_per_cento() {
+        let p = tracking("filo", |t| t < 15_000.0, |_| true);
+        assert!((p - 0.5).abs() < 1e-3, "{p}");
+    }
+
+    #[test]
+    fn tracking_sopra_sempre_e_tasto_a_meta_e_il_50_per_cento() {
+        let p = tracking("guizzo", |_| true, |t| (t / 1000.0).floor() as i64 % 2 == 0);
+        assert!((p - 0.5).abs() < 2e-3, "{p}");
+    }
+
+    #[test]
+    fn tracking_sopra_per_20_secondi_col_tasto_a_secondi_alterni_e_un_terzo() {
+        // Sopra nei primi 20 s, tasto giù nei secondi pari (0-1, 2-3, ... 18-19): 10 s di 30.
+        let p = tracking("filo", |t| t < 20_000.0, |t| (t / 1000.0).floor() as i64 % 2 == 0);
+        assert!((p - 1.0 / 3.0).abs() < 2e-3, "{p}");
+    }
+
+    #[test]
+    fn nel_tracking_i_clic_non_sono_colpi_ne_errori() {
+        let mut g = partito("filo", 25, 0.0);
+        let d = mira_a(&g, 0);
+        assert_eq!(g.tasto(100.0, true, d), Esito::Ignorato);
+        g.tasto(200.0, false, d);
+        assert_eq!(g.tasto(300.0, true, -d), Esito::Ignorato);
+        assert_eq!((g.colpi, g.errori), (0, 0));
+        let r = g.riepilogo();
+        assert_eq!((r.precisione, r.tempo_medio_ms), (None, None));
+    }
+
+    #[test]
+    fn la_pausa_non_entra_nel_tracking() {
+        let mut g = partito("filo", 26, 0.0);
+        let d = mira_a(&g, 0);
+        g.tasto(0.0, true, d);
+        // A ogni frame la sfera si muove e il mirino la segue.
+        for passo in 1..=10_000 {
+            let t = f64::from(passo);
+            g.avanza(t);
+            g.traccia(t, mira_a(&g, 0));
+        }
+        g.pausa(10_000.0);
+        g.traccia(50_000.0, d);
+        g.riprendi(50_000.0);
+        // Dopo la ripresa il tasto si ripreme.
+        g.avanza(50_000.0);
+        g.tasto(50_000.0, true, mira_a(&g, 0));
+        for passo in 1..=20_000 {
+            let t = 50_000.0 + f64::from(passo);
+            g.avanza(t);
+            let d = mira_a(&g, 0);
+            g.traccia(t, d);
+        }
+        assert!(g.aggiorna(70_000.0));
+        let p = g.riepilogo().tracking.unwrap();
+        assert!((p - 1.0).abs() < 1e-3, "{p}");
+    }
+
+    #[test]
+    fn il_tracking_del_conto_alla_rovescia_non_conta() {
+        let mut g = Giro::new(OCCHIO, Caso::new(27), regole("filo"));
+        g.inizia(0.0);
+        g.avanza(0.0);
+        let d = mira_a(&g, 0);
+        g.tasto(10.0, true, d);
+        // Il clic ha saltato il conto: da qui il tempo di gioco parte, col tasto giù.
+        for passo in 11..=3010 {
+            let t = f64::from(passo);
+            g.avanza(t);
+            g.traccia(t, mira_a(&g, 0));
+        }
+        let fatto = g.riepilogo().tracking.unwrap() * 30_000.0;
+        assert!((fatto - 3000.0).abs() < 2.0, "{fatto} ms");
     }
 }
