@@ -51,8 +51,13 @@ Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
   colpirla, controllato a ogni clic con la visuale del suo istante e a ogni frame dopo il movimento: un passaggio
   che entra ed esce dentro lo stesso frame non si vede, e col limite a 240 fps un frame dura 4,17 ms). Legge il giro
   solo dalla sua parte pubblica; la memoria (1024 bersagli) si prepara all'avvio, nel frame non alloca.
-- `storico.rs`, `esporta.rs`: lo storico dei giri (formato qui sotto), il record per scenario, la sessione e
-  l'esportazione CSV. La schermata Statistiche sta in `interfaccia.rs`, col grafico disegnato dal painter di egui.
+- `storico.rs`: lo storico dei giri (formato qui sotto) e il record per scenario.
+- `statistiche.rs`, `schermata_statistiche.rs`: i conti delle statistiche (andamento con media mobile, giorni,
+  settimana contro settimana, punti deboli per direzione e distanza, giri migliori, dettaglio di un giro) e la loro
+  schermata, con i grafici disegnati dal painter di egui. Si calcolano solo nella schermata, fuori dal giro, da una
+  sintesi per giro preparata quando lo storico si legge (`Storico::carica_con`, una lettura sola) o quando un giro
+  finisce: in memoria restano pochi numeri per giro, e il dettaglio rilegge il file del giro quando lo si apre. Il
+  punteggio di un giro passa da `statistiche::punteggio`.
 - `latenza.rs`, `misure.rs`, `banco.rs`, `allocazioni.rs`: le misure, il pannello F3 e il banco `--bench`.
 - `aggiornamento.rs`, `rete.rs`: l'aggiornamento dall'app (qui sotto).
 
@@ -131,6 +136,8 @@ versione = "0.1.0"              # versione di aimpro
 tempo_ms = 297.44               # comparsa → colpo
 distanza_gradi = 24.78          # dal bersaglio precedente
 overshoot = 1
+orizzontale_gradi = -20.5       # spostamento dal precedente, positivo a destra (manca nei giri di prima)
+verticale_gradi = 11.0          # positivo in alto; la direzione è quella dello spostamento più lungo
 ```
 
 All'avvio un thread legge tutti i file, mentre la finestra si apre (il primo che serve lo storico, a fine giro o
@@ -141,16 +148,12 @@ scenario è record se ha almeno un colpo). Uno scenario nuovo usa un suo `scenar
 aggiunti con un valore predefinito (`#[serde(default)]`), così i file vecchi si leggono ancora; un cambio che i
 file vecchi non reggono alza `formato`.
 
-"Esporta CSV" scrive `aimpro-giri-AAAAMMGG-hhmmss.csv` nella cartella `aimpro` dei Documenti di Windows (quella vera,
-anche se spostata, da `SHGetKnownFolderPath`), una riga per giro. Per Excel in italiano: separatore `;`, decimali
-con la virgola, data `GG/MM/AAAA hh:mm:ss`, UTF-8 con il BOM, righe chiuse da CRLF.
-
 ## Come si prova
 
 ```
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # 90 test: sensibilità, impostazioni, menu, visuale, giro, registro, storico, CSV, misure, tempo, aggiornamento
+cargo test                      # 104 test: sensibilità, impostazioni, menu, visuale, giro, registro, storico, statistiche, misure, tempo, aggiornamento
 cargo run --release             # il gioco, a schermo intero (Esc pausa, F3 pannello della latenza)
 cargo run --release -- --finestra            # in una finestra normale
 cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce, scrive misure\bench-<ora>.md

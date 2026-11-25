@@ -16,9 +16,11 @@ con il tuo record.
 
 Ogni giro finito resta sul PC, in `%APPDATA%\aimpro\storico\`: un file per giro con i numeri del giro, le
 impostazioni usate e, per ogni bersaglio, il tempo per colpirlo, la distanza dal precedente e gli overshoot (le volte
-che il mirino è entrato nella sfera e ne è uscito senza colpirla). Dal menu, "Statistiche" mostra l'andamento degli
-ultimi giri con la linea del record, i giri da quando hai aperto aimpro e l'elenco completo; "Esporta CSV" scrive un
-file per Excel nella cartella `aimpro` dei Documenti.
+che il mirino è entrato nella sfera e ne è uscito senza colpirla). Dal menu, "Statistiche" ha quattro schede, per
+scenario e per periodo (7 giorni, 30 giorni, tutto): l'andamento di punteggio, precisione e tempo medio con la media
+mobile e il record; i giorni uno per uno e gli ultimi 7 giorni contro i 7 prima; i punti deboli (direzioni e distanze
+più lente, overshoot, giri migliori contro gli altri); l'elenco dei giri, dove un clic apre il dettaglio di un giro
+con il tempo di ogni bersaglio.
 
 La sensibilità si imposta come in CS2 o in Valorant, con il FOV e i DPI del mouse: i gradi per count sono quelli del
 gioco scelto. Le impostazioni restano in `%APPDATA%\aimpro\config.toml`.
