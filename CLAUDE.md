@@ -282,7 +282,9 @@ cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce,
 Il banco prende lo schermo intero per circa due minuti e simula il mouse con `SendInput` solo quando aimpro è in
 primo piano. Ogni fase di giro riparte da capo se la finestra perde il primo piano. La fase "giro, vsync spento,
 suoni accesi" tiene accesi i suoni (ogni clic simulato, uno ogni 250 ms, ne fa partire uno) e controlla che siano
-partiti; le altre fasi li tengono spenti, come la sensibilità a caso. Banco del 25/11/2026, stesso PC, prima e
+partiti; le altre fasi li tengono spenti, come la sensibilità a caso. La fase "giro, vsync spento, un clic ogni
+10 ms" misura clic→present su più di mille clic (la colonna dice quanti) ed è NON VALIDA con meno del 90% dei clic
+attesi: con un clic ogni 250 ms le mediane delle altre fasi stanno su circa 60 clic. Banco del 25/11/2026, stesso PC, prima e
 dopo la task dell'aspetto (`verifiche\aimpro-20261122-aspetto\banco\prima-2.md` e `dopo-2.md`): count→present
 vecchio nel giro a vsync spento 0,33 / 0,65 ms prima e 0,33 / 0,60 dopo (mediana / 99°), coi suoni accesi
 0,31 / 0,50; 0 allocazioni di aimpro nel frame in tutte le fasi. Accanto al file dei risultati
