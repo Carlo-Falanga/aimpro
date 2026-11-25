@@ -30,6 +30,7 @@ use crate::config::{self, Config};
 use crate::esporta;
 use crate::giro::{Caso, Esito, Giro, Riepilogo};
 use crate::grafica::{Grafica, MAX_SFERE, Scena, SferaGpu, Sfere, StratoEgui};
+use crate::home::{self, Home, InfoHome, Pagina};
 use crate::ingresso::{Clic, Ingresso};
 use crate::interfaccia::{self, Azione, InfoMenu};
 use crate::latenza::{CAMPIONI_PANNELLO, Latenza, testo_pannello};
@@ -62,7 +63,6 @@ pub enum Stato {
     Giro,
     Pausa,
     Riepilogo(Riepilogo),
-    Statistiche,
 }
 
 /// Lo strato egui disegnato sopra il giro (pannello della latenza), ricalcolato ogni tanto.
@@ -95,6 +95,9 @@ pub struct App {
     scenario_statistiche: String,
     /// Quando sono comparsi la pausa o il riepilogo: i loro pulsanti rispondono dopo `ATTESA_PULSANTI`.
     entrata: Option<Instant>,
+    /// La home: pagina e filtri della libreria; la pagina del frame prima, per ridisegnare quando cambia.
+    pub home: Home,
+    home_pagina_prima: Pagina,
     /// Tempi, distanze e overshoot dei bersagli del giro: la memoria è preparata qui, nel frame non alloca.
     registro: Registro,
     /// I giri salvati; il giro finito si aggiunge e si scrive in `fine_giro`. Si leggono in un thread partito
@@ -170,7 +173,9 @@ fn modo_migliore(monitor: &MonitorHandle) -> Option<VideoModeHandle> {
 impl App {
     pub fn new(banco: Option<Banco>, proxy: EventLoopProxy<()>) -> Self {
         let percorso_config = config::percorso_predefinito();
-        let (config, avviso) = config::carica(&percorso_config);
+        let (mut config, avviso) = config::carica(&percorso_config);
+        // Il banco misura il menu di sempre, la home, anche su un PC dove aimpro non è mai partito.
+        config.primo_avvio_fatto |= banco.is_some();
         // Il banco non va in rete: niente che si mescoli alle sue misure. Il thread sveglia il menu con un evento.
         let aggiornamento = Aggiornamento::avvia(
             banco.is_none() && config.controlla_aggiornamenti,
@@ -206,6 +211,8 @@ impl App {
             parametri_giro: Parametri::STANDARD,
             scenario_statistiche,
             entrata: None,
+            home: Home::default(),
+            home_pagina_prima: Pagina::Gioca,
             registro: Registro::new(OCCHIO),
             storico: None,
             // Il banco non usa lo storico: niente lettura che si mescoli alle sue misure.
@@ -666,10 +673,15 @@ impl App {
         let avviso = self.avviso.clone();
         let (confronto, avviso_storico, esportato) =
             (self.confronto, self.avviso_storico.clone(), self.esportato.clone());
-        if stato_ora == Stato::Statistiche {
-            self.storico();
+        if stato_ora == Stato::Menu {
+            // Le statistiche aspettano lo storico; le altre pagine lo usano appena il thread ha finito.
+            let pronto = self.storico_in_arrivo.as_ref().is_none_or(|t| t.is_finished());
+            if self.home.pagina == Pagina::Statistiche || pronto {
+                self.storico();
+            }
         }
         let storico = self.storico.as_ref();
+        let mut home = std::mem::take(&mut self.home);
         // Fuori dal giro le misure non cambiano: il testo si ricalcola solo se ci sono frame nuovi.
         let pannello = if self.pannello_visibile {
             let n = self.latenza.versione();
@@ -691,18 +703,25 @@ impl App {
         let mut azione = Azione::Nessuna;
         let mut uscita = self.egui_ctx.run_ui(input, |ui| {
             azione = match stato_ora {
-                Stato::Menu => interfaccia::menu(
+                Stato::Menu if !cfg.primo_avvio_fatto => home::benvenuto(ui, &mut cfg),
+                Stato::Menu => home::home(
                     ui,
+                    &mut home,
                     &mut cfg,
-                    &InfoMenu {
-                        scheda: &scheda,
-                        presentazione: &presentazione,
-                        avviso: avviso.as_deref(),
-                        build: self.aggiornamento.attuale(),
-                        aggiornamento: &stato_aggiornamento,
-                        hz_schermo: interfaccia::hz_intero(self.hz_schermo),
-                        scenari,
-                        avvisi_scenari: &self.avvisi_scenari,
+                    &mut scelta_statistiche,
+                    &InfoHome {
+                        menu: InfoMenu {
+                            scheda: &scheda,
+                            presentazione: &presentazione,
+                            avviso: avviso.as_deref(),
+                            build: self.aggiornamento.attuale(),
+                            aggiornamento: &stato_aggiornamento,
+                            hz_schermo: interfaccia::hz_intero(self.hz_schermo),
+                            scenari,
+                            avvisi_scenari: &self.avvisi_scenari,
+                        },
+                        storico,
+                        esportato: esportato.as_deref(),
                     },
                 ),
                 Stato::Pausa => interfaccia::pausa(ui, restanti, attesa),
@@ -718,9 +737,6 @@ impl App {
                         attesa,
                     },
                 ),
-                Stato::Statistiche => storico.map_or(Azione::TornaAlMenu, |s| {
-                    interfaccia::statistiche(ui, s, scenari, &mut scelta_statistiche, esportato.as_deref())
-                }),
                 Stato::Giro => Azione::Nessuna,
             };
             if let Some(t) = &pannello {
@@ -763,8 +779,20 @@ impl App {
         // Il pannello del giro va ricalcolato: le texture di egui possono essere cambiate.
         self.pannello = None;
 
+        if home.pagina != self.home_pagina_prima {
+            // Una pagina nuova si disegna dall'alto e con i suoi dati (lo storico) già pronti.
+            self.home_pagina_prima = home.pagina.clone();
+            self.ridisegna();
+        }
+        self.home = home;
         if cfg != self.config {
+            // Ogni cambio dalle pagine (scenario scelto, preferiti, impostazioni) si salva.
             self.config = cfg;
+            if azione == Azione::Nessuna {
+                azione = Azione::Impostazioni;
+            } else {
+                self.da_salvare = true;
+            }
         }
         if scelta_statistiche != self.scenario_statistiche {
             self.scenario_statistiche = scelta_statistiche;
@@ -806,7 +834,7 @@ impl App {
                 };
                 self.torna_al_menu();
                 self.esportato = None;
-                self.stato = Stato::Statistiche;
+                self.home.pagina = Pagina::Statistiche;
             }
             Azione::EsportaCsv => {
                 self.esporta_csv();
@@ -981,7 +1009,6 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::Escape) => match self.stato {
                         Stato::Giro => self.pausa(),
                         Stato::Pausa => self.riprendi(),
-                        Stato::Statistiche => self.torna_al_menu(),
                         _ => {}
                     },
                     PhysicalKey::Code(KeyCode::F3) => {

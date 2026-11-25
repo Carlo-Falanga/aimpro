@@ -12,8 +12,8 @@ use crate::sensibilita::{Gioco, cm_per_360, converti, gradi_per_count};
 use crate::storico::{Confronto, GiroSalvato, Storico};
 
 pub const ACCENTO: Color32 = Color32::from_rgb(255, 176, 33);
-const TENUE: Color32 = Color32::from_rgb(161, 163, 169);
-const AVVISO: Color32 = Color32::from_rgb(255, 210, 122);
+pub const TENUE: Color32 = Color32::from_rgb(161, 163, 169);
+pub const AVVISO: Color32 = Color32::from_rgb(255, 210, 122);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Azione {
@@ -185,7 +185,7 @@ fn maiuscola(t: &str) -> String {
 }
 
 /// Il riquadro dell'aggiornamento in cima al menu; niente se non c'è niente da dire.
-fn aggiornamento(ui: &mut Ui, build: Option<u32>, stato: &StatoAggiornamento) -> Azione {
+pub fn aggiornamento(ui: &mut Ui, build: Option<u32>, stato: &StatoAggiornamento) -> Azione {
     let tua = build.map_or("una build locale".to_string(), |b| format!("la build {b}"));
     let (titolo, riga, colore, pulsante_attivo, testo_pulsante) = match stato {
         StatoAggiornamento::Nessuno => return Azione::Nessuna,
@@ -261,14 +261,14 @@ pub fn stile(ctx: &egui::Context) {
     ctx.set_global_style(s);
 }
 
-fn scheda(ui: &mut Ui, nome: &str, contenuto: impl FnOnce(&mut Ui) -> Azione) -> Azione {
+pub fn scheda(ui: &mut Ui, nome: &str, contenuto: impl FnOnce(&mut Ui) -> Azione) -> Azione {
     scheda_larga(ui, nome, 440.0, contenuto)
 }
 
 /// Un riquadro centrato. `nome` gli dà un id suo: egui centra l'area con la misura che aveva nel frame prima, e con
 /// un id in comune il primo frame di un riquadro prenderebbe la misura di un altro (la pausa usciva più in alto,
 /// con l'altezza del riepilogo).
-fn scheda_larga(
+pub fn scheda_larga(
     ui: &mut Ui,
     nome: &str,
     larghezza: f32,
@@ -304,7 +304,7 @@ fn scheda_larga(
     azione
 }
 
-fn pulsante(ui: &mut Ui, testo: &str, principale: bool) -> bool {
+pub fn pulsante(ui: &mut Ui, testo: &str, principale: bool) -> bool {
     let t = RichText::new(testo).size(16.0).strong();
     let b = if principale {
         egui::Button::new(t.color(Color32::from_rgb(23, 19, 10))).fill(ACCENTO)
@@ -314,232 +314,211 @@ fn pulsante(ui: &mut Ui, testo: &str, principale: bool) -> bool {
     ui.add_sized([ui.available_width(), 38.0], b).clicked()
 }
 
-pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
-    scheda(ui, "menu", |ui| {
-        ui.label(RichText::new("aimpro").size(28.0).strong());
-        let mut azione = Azione::Nessuna;
-        let scelto = info.scenari.iter().find(|s| s.id == c.scenario).or(info.scenari.first());
-        egui::Grid::new("scenario").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-            ui.label("Scenario");
-            let prima = c.scenario.clone();
-            egui::ComboBox::from_id_salt("scenario")
-                .selected_text(scelto.map_or("", |s| s.nome.as_str()))
-                .width(220.0)
-                .height(400.0)
-                .show_ui(ui, |ui| {
-                    for s in info.scenari {
-                        ui.selectable_value(&mut c.scenario, s.id.clone(), &s.nome)
-                            .on_hover_text(&s.descrizione);
-                    }
-                });
-            if c.scenario != prima {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
+/// Mentre si scarica o si riavvia un aggiornamento non si gioca: la rete non lavora durante il giro.
+pub fn si_gioca(info: &InfoMenu) -> bool {
+    !matches!(info.aggiornamento, StatoAggiornamento::Scarico { .. } | StatoAggiornamento::Pronto(_))
+}
 
-            ui.label("Dimensione bersagli");
-            if campo_parametro(ui, &mut c.dimensione, true) {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
+/// Le righe della sensibilità in una griglia a due colonne: gioco, sensibilità, FOV (se `con_fov`) e DPI. Vero se
+/// qualcosa è cambiato.
+pub fn righe_sensibilita(ui: &mut Ui, c: &mut Config, con_fov: bool) -> bool {
+    let mut cambiato = false;
+    ui.label("Sensibilità di");
+    let prima = c.gioco;
+    egui::ComboBox::from_id_salt("gioco").selected_text(c.gioco.nome()).show_ui(ui, |ui| {
+        for g in Gioco::TUTTI {
+            ui.selectable_value(&mut c.gioco, g, g.nome());
+        }
+    });
+    if c.gioco != prima {
+        // Stessi centimetri per giro nel gioco nuovo; FOV al valore di base del gioco.
+        // Dentro i limiti: un valore estremo convertito si ferma al limite invece di tornare al predefinito.
+        c.sensibilita = ((converti(prima, c.sensibilita, c.gioco) * 1_000_000.0).round() / 1_000_000.0)
+            .clamp(LIMITI_SENSIBILITA.0, LIMITI_SENSIBILITA.1);
+        c.fov = c.gioco.fov_predefinito();
+        cambiato = true;
+    }
+    ui.end_row();
 
-            let si_muove = info
-                .scenari
-                .iter()
-                .find(|s| s.id == c.scenario)
-                .is_some_and(|s| s.regole.movimento != TipoMovimento::Fermo);
-            ui.label("Velocità bersagli");
-            ui.horizontal(|ui| {
-                if campo_parametro(ui, &mut c.velocita, si_muove) {
-                    azione = Azione::Impostazioni;
-                }
-                if !si_muove {
-                    ui.label(
-                        RichText::new("le sfere di questo scenario stanno ferme").color(TENUE).size(12.0),
-                    );
-                }
-            });
-            ui.end_row();
+    ui.label("Sensibilità");
+    cambiato |= ui
+        .add(
+            egui::DragValue::new(&mut c.sensibilita)
+                .range(LIMITI_SENSIBILITA.0..=LIMITI_SENSIBILITA.1)
+                .speed(0.005)
+                .max_decimals(4),
+        )
+        .changed();
+    ui.end_row();
+
+    if con_fov {
+        ui.label(if c.gioco == Gioco::Cs2 {
+            "FOV (su 4:3, 90 in CS2)"
+        } else {
+            "FOV (su 16:9, 103 in Valorant)"
         });
-        if let Some(s) = info.scenari.iter().find(|s| s.id == c.scenario) {
-            ui.label(RichText::new(spiegazione(s)).color(TENUE).size(13.0));
+        cambiato |= ui
+            .add(
+                egui::DragValue::new(&mut c.fov)
+                    .range(LIMITI_FOV.0..=LIMITI_FOV.1)
+                    .speed(0.1)
+                    .max_decimals(2),
+            )
+            .changed();
+        ui.end_row();
+    }
+
+    ui.label("DPI del mouse");
+    cambiato |=
+        ui.add(egui::DragValue::new(&mut c.dpi).range(LIMITI_DPI.0..=LIMITI_DPI.1).speed(10.0)).changed();
+    ui.end_row();
+    cambiato
+}
+
+/// La riga sotto la sensibilità: gradi per count e centimetri per giro.
+pub fn riga_cm(ui: &mut Ui, c: &Config) {
+    ui.label(
+        RichText::new(format!(
+            "Ogni count del mouse gira la visuale di {:.4} gradi: a {:.0} DPI un giro completo è {:.1} cm.",
+            gradi_per_count(c.gioco, c.sensibilita),
+            c.dpi,
+            cm_per_360(c.gioco, c.sensibilita, c.dpi)
+        ))
+        .color(TENUE)
+        .size(13.0),
+    );
+}
+
+/// Il contenuto della pagina Impostazioni della home.
+pub fn impostazioni(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
+    let mut azione = Azione::Nessuna;
+    titolo_pagina(ui, "Impostazioni", "Valgono per tutti gli scenari e si salvano da sole.");
+    egui::Grid::new("impostazioni").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+        if righe_sensibilita(ui, c, true) {
+            azione = Azione::Impostazioni;
         }
-        if !c.parametri().standard() {
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new("Parametri cambiati: i giri si salvano ma non fanno record.")
-                        .color(AVVISO)
-                        .size(13.0),
-                );
-                if ui.small_button("Standard").clicked() {
-                    (c.dimensione, c.velocita) =
-                        (Parametri::STANDARD.dimensione, Parametri::STANDARD.velocita);
-                    azione = Azione::Impostazioni;
-                }
-            });
+
+        ui.label("Vsync");
+        if ui.checkbox(&mut c.vsync, "acceso (più latenza, niente tearing)").changed() {
+            azione = Azione::Impostazioni;
         }
-        for a in info.avvisi_scenari.iter().take(3) {
-            ui.label(RichText::new(a).color(AVVISO).size(12.0));
-        }
-        if info.avvisi_scenari.len() > 3 {
-            ui.label(
-                RichText::new(format!("e altri {} file di scenario saltati", info.avvisi_scenari.len() - 3))
-                    .color(AVVISO)
-                    .size(12.0),
+        ui.end_row();
+
+        if c.vsync {
+            // Col vsync il limite non vale: la riga resta, grigia, e dice perché.
+            // Disegnate come disattivate, cioè più scure delle altre righe.
+            ui.add_enabled(false, egui::Label::new("Limite fps"));
+            // Alta quanto la tendina: accendendo il vsync la pagina non si sposta.
+            let alta = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+            ui.allocate_ui_with_layout(
+                egui::vec2(0.0, alta),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| ui.add_enabled(false, egui::Label::new("col vsync decide lo schermo")),
             );
+        } else {
+            ui.label("Limite fps");
+            if riga_limite(ui, c, info.hz_schermo) {
+                azione = Azione::Impostazioni;
+            }
         }
-        ui.separator();
-        let a = aggiornamento(ui, info.build, info.aggiornamento);
-        if a != Azione::Nessuna {
-            azione = a;
+        ui.end_row();
+
+        ui.label("Schermo intero");
+        if ui.checkbox(&mut c.schermo_intero_esclusivo, "esclusivo (vale dal prossimo avvio)").changed() {
+            azione = Azione::Impostazioni;
         }
-        // Mentre si scarica o si riavvia non si gioca: la rete non lavora durante il giro.
-        let si_gioca =
-            !matches!(info.aggiornamento, StatoAggiornamento::Scarico { .. } | StatoAggiornamento::Pronto(_));
+        ui.end_row();
 
-        egui::Grid::new("impostazioni").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-            ui.label("Sensibilità di");
-            let prima = c.gioco;
-            egui::ComboBox::from_id_salt("gioco").selected_text(c.gioco.nome()).show_ui(ui, |ui| {
-                for g in Gioco::TUTTI {
-                    ui.selectable_value(&mut c.gioco, g, g.nome());
-                }
-            });
-            if c.gioco != prima {
-                // Stessi centimetri per giro nel gioco nuovo; FOV al valore di base del gioco.
-                // Dentro i limiti: un valore estremo convertito si ferma al limite invece di tornare al predefinito.
-                c.sensibilita = ((converti(prima, c.sensibilita, c.gioco) * 1_000_000.0).round()
-                    / 1_000_000.0)
-                    .clamp(LIMITI_SENSIBILITA.0, LIMITI_SENSIBILITA.1);
-                c.fov = c.gioco.fov_predefinito();
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
+        ui.label("Nel giro");
+        if ui
+            .checkbox(&mut c.punteggio_dal_vivo, "punteggio e precisione dal vivo, in alto a sinistra")
+            .changed()
+        {
+            azione = Azione::Impostazioni;
+        }
+        ui.end_row();
 
-            ui.label("Sensibilità");
-            if ui
-                .add(
-                    egui::DragValue::new(&mut c.sensibilita)
-                        .range(LIMITI_SENSIBILITA.0..=LIMITI_SENSIBILITA.1)
-                        .speed(0.005)
-                        .max_decimals(4),
-                )
-                .changed()
-            {
-                azione = Azione::Impostazioni;
+        ui.label("Aggiornamenti");
+        if ui.checkbox(&mut c.controlla_aggiornamenti, "controlla all'avvio").changed() {
+            azione = Azione::Impostazioni;
+        }
+        ui.end_row();
+    });
+    ui.add_space(2.0);
+    riga_cm(ui, c);
+    if let Some(a) = info.avviso {
+        ui.label(RichText::new(a).color(AVVISO).size(13.0));
+    }
+    ui.add_space(10.0);
+    ui.label(RichText::new("Tasti").size(15.0).strong());
+    for riga in [
+        "Esc mette in pausa il giro (e lo riprende).",
+        "R ricomincia subito il giro, anche dal riepilogo.",
+        "Spazio, o un clic, salta il conto alla rovescia.",
+        "F3 apre il pannello della latenza.",
+    ] {
+        ui.label(RichText::new(riga).color(TENUE).size(13.0));
+    }
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new(format!(
+            "{} · {} · {}",
+            info.build.map_or("build locale".to_string(), |b| format!("build {b}")),
+            info.scheda,
+            match info.presentazione {
+                "Immediate" | "Mailbox" => "vsync spento",
+                "Fifo" => "vsync acceso",
+                altro => altro,
             }
-            ui.end_row();
+        ))
+        .color(TENUE)
+        .size(12.0),
+    );
+    azione
+}
 
-            ui.label(if c.gioco == Gioco::Cs2 {
-                "FOV (su 4:3, 90 in CS2)"
-            } else {
-                "FOV (su 16:9, 103 in Valorant)"
-            });
-            if ui
-                .add(
-                    egui::DragValue::new(&mut c.fov)
-                        .range(LIMITI_FOV.0..=LIMITI_FOV.1)
-                        .speed(0.1)
-                        .max_decimals(2),
-                )
-                .changed()
-            {
-                azione = Azione::Impostazioni;
+/// Dimensione e velocità dei bersagli (uguali per tutti gli scenari), nella pagina dello scenario. Vero se cambiano.
+pub fn parametri_scenario(ui: &mut Ui, c: &mut Config, s: &Scenario) -> bool {
+    let mut cambiato = false;
+    let si_muove = s.regole.movimento != TipoMovimento::Fermo;
+    egui::Grid::new("parametri").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+        ui.label("Dimensione bersagli");
+        cambiato |= campo_parametro(ui, &mut c.dimensione, true);
+        ui.end_row();
+        ui.label("Velocità bersagli");
+        ui.horizontal(|ui| {
+            cambiato |= campo_parametro(ui, &mut c.velocita, si_muove);
+            if !si_muove {
+                ui.label(RichText::new("le sfere di questo scenario stanno ferme").color(TENUE).size(12.0));
             }
-            ui.end_row();
-
-            ui.label("DPI del mouse");
-            if ui
-                .add(egui::DragValue::new(&mut c.dpi).range(LIMITI_DPI.0..=LIMITI_DPI.1).speed(10.0))
-                .changed()
-            {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
-
-            ui.label("Vsync");
-            if ui.checkbox(&mut c.vsync, "acceso (più latenza, niente tearing)").changed() {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
-
-            if c.vsync {
-                // Col vsync il limite non vale: la riga resta, grigia, e dice perché.
-                // Disegnate come disattivate, cioè più scure delle altre righe.
-                ui.add_enabled(false, egui::Label::new("Limite fps"));
-                // Alta quanto la tendina: accendendo il vsync il riquadro non si sposta.
-                let alta =
-                    ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
-                ui.allocate_ui_with_layout(
-                    egui::vec2(0.0, alta),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| ui.add_enabled(false, egui::Label::new("col vsync decide lo schermo")),
-                );
-            } else {
-                ui.label("Limite fps");
-                if riga_limite(ui, c, info.hz_schermo) {
-                    azione = Azione::Impostazioni;
-                }
-            }
-            ui.end_row();
-
-            ui.label("Schermo intero");
-            if ui.checkbox(&mut c.schermo_intero_esclusivo, "esclusivo (vale dal prossimo avvio)").changed() {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
-
-            ui.label("Aggiornamenti");
-            if ui.checkbox(&mut c.controlla_aggiornamenti, "controlla all'avvio").changed() {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
         });
+        ui.end_row();
+    });
+    if c.parametri().standard() {
+        ui.label(RichText::new("Parametri standard: i giri fanno record.").color(TENUE).size(13.0));
+    } else {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new("Parametri cambiati: i giri si salvano ma non fanno record.")
+                    .color(AVVISO)
+                    .size(13.0),
+            );
+            if ui.small_button("Torna allo standard").clicked() {
+                (c.dimensione, c.velocita) = (Parametri::STANDARD.dimensione, Parametri::STANDARD.velocita);
+                cambiato = true;
+            }
+        });
+    }
+    cambiato
+}
 
-        ui.add_space(2.0);
-        ui.label(
-            RichText::new(format!(
-                "Ogni count del mouse gira la visuale di {:.4} gradi: a {:.0} DPI un giro completo è {:.1} cm.",
-                gradi_per_count(c.gioco, c.sensibilita),
-                c.dpi,
-                cm_per_360(c.gioco, c.sensibilita, c.dpi)
-            ))
-            .color(TENUE)
-            .size(13.0),
-        );
-        if let Some(a) = info.avviso {
-            ui.label(RichText::new(a).color(AVVISO).size(13.0));
-        }
-        ui.add_space(6.0);
-        if ui.add_enabled_ui(si_gioca, |ui| pulsante(ui, "Inizia", true)).inner {
-            azione = Azione::Inizia;
-        }
-        if pulsante(ui, "Statistiche", false) {
-            azione = Azione::Statistiche;
-        }
-        if pulsante(ui, "Esci da aimpro", false) {
-            azione = Azione::Chiudi;
-        }
-        // Due righe: in una sola, nel riquadro da 440 px, il nome della scheda finiva spezzato a metà.
-        ui.label(
-            RichText::new("Esc mette in pausa, F3 apre il pannello della latenza.").color(TENUE).size(12.0),
-        );
-        ui.label(
-            RichText::new(format!(
-                "{} · {} · {}",
-                info.build.map_or("build locale".to_string(), |b| format!("build {b}")),
-                info.scheda,
-                match info.presentazione {
-                    "Immediate" | "Mailbox" => "vsync spento",
-                    "Fifo" => "vsync acceso",
-                    altro => altro,
-                }
-            ))
-            .color(TENUE)
-            .size(12.0),
-        );
-        azione
-    })
+/// Il titolo di una pagina della home, con una riga sotto.
+pub fn titolo_pagina(ui: &mut Ui, titolo: &str, riga: &str) {
+    ui.label(RichText::new(titolo).size(26.0).strong());
+    if !riga.is_empty() {
+        ui.label(RichText::new(riga).color(TENUE));
+    }
+    ui.add_space(8.0);
 }
 
 /// Un pulsante che risponde solo quando `attesa` è finita (Riprendi, Rigioca): prima è spento, e il menu si ridisegna
@@ -676,9 +655,10 @@ pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, info: &InfoRiepilogo) -> Azione {
         if pulsante(ui, "Statistiche", false) {
             azione = Azione::Statistiche;
         }
-        if pulsante(ui, "Impostazioni", false) {
+        if pulsante(ui, "Torna alla home", false) {
             azione = Azione::TornaAlMenu;
         }
+        ui.label(RichText::new("R rigioca subito, anche adesso.").color(TENUE).size(12.0));
         azione
     })
 }
@@ -799,7 +779,8 @@ pub fn statistiche(
     scelto: &mut String,
     esportato: Option<&str>,
 ) -> Azione {
-    scheda_larga(ui, "statistiche", 800.0, |ui| {
+    // Il contenuto della pagina Statistiche della home.
+    let mut contenuto = |ui: &mut Ui| {
         let mut azione = Azione::Nessuna;
         ui.label(RichText::new("Statistiche").size(26.0).strong());
         let elenco = scenari_delle_statistiche(scenari, s);
@@ -936,20 +917,14 @@ pub fn statistiche(
             ui.label(RichText::new(e).size(13.0));
         }
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let w = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-            let esporta = egui::Button::new(RichText::new("Esporta CSV").size(16.0).strong());
-            if ui.add_enabled_ui(!s.giri().is_empty(), |ui| ui.add_sized([w, 38.0], esporta)).inner.clicked()
-            {
-                azione = Azione::EsportaCsv;
-            }
-            let torna = egui::Button::new(RichText::new("Torna al menu").size(16.0).strong());
-            if ui.add_sized([w, 38.0], torna).clicked() {
-                azione = Azione::TornaAlMenu;
-            }
-        });
+        let esporta = egui::Button::new(RichText::new("Esporta CSV").size(16.0).strong());
+        if ui.add_enabled_ui(!s.giri().is_empty(), |ui| ui.add_sized([240.0, 38.0], esporta)).inner.clicked()
+        {
+            azione = Azione::EsportaCsv;
+        }
         azione
-    })
+    };
+    contenuto(ui)
 }
 
 pub fn pannello_latenza(ui: &mut Ui, testo: &str) {

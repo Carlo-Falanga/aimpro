@@ -16,6 +16,7 @@ mod config;
 mod esporta;
 mod giro;
 mod grafica;
+mod home;
 mod ingresso;
 mod interfaccia;
 mod latenza;

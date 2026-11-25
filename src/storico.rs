@@ -279,6 +279,42 @@ impl Storico {
         }
     }
 
+    /// Gli id degli ultimi scenari giocati, dal più recente, senza ripetizioni (per la home).
+    pub fn ultimi_giocati(&self, n: usize) -> Vec<&str> {
+        let mut v: Vec<&str> = Vec::new();
+        for g in self.giri.iter().rev() {
+            if v.len() >= n {
+                break;
+            }
+            if !v.contains(&g.scenario.as_str()) {
+                v.push(&g.scenario);
+            }
+        }
+        v
+    }
+
+    /// I giri che hanno fatto un record nuovo (coi parametri standard), dal più recente: al più `n`.
+    pub fn record_recenti(&self, n: usize) -> Vec<&GiroSalvato> {
+        let mut migliori: Vec<(&str, f64)> = Vec::new();
+        let mut record = Vec::new();
+        for g in self.giri.iter().filter(|g| g.standard()) {
+            let p = g.punteggio();
+            match migliori.iter_mut().find(|(id, _)| *id == g.scenario) {
+                Some((_, m)) if p > *m + 1e-9 => {
+                    *m = p;
+                    record.push(g);
+                }
+                Some(_) => {}
+                None if p > 0.0 => {
+                    migliori.push((&g.scenario, p));
+                    record.push(g);
+                }
+                None => {}
+            }
+        }
+        record.into_iter().rev().take(n).collect()
+    }
+
     /// Scrive il giro nel suo file e lo aggiunge allo storico; dice il confronto con il record di prima.
     /// Anche se la scrittura non riesce, il giro resta in memoria fino alla chiusura.
     pub fn aggiungi(&mut self, mut g: GiroSalvato, ora: Ora) -> (Confronto, std::io::Result<PathBuf>) {
@@ -548,6 +584,38 @@ tempo_ms = 297.44
 distanza_gradi = 24.78
 overshoot = 1
 "#;
+
+    #[test]
+    fn ultimi_giocati_e_record_recenti_restano_dopo_un_riavvio() {
+        let d = cartella_di_prova("home");
+        let mut s = Storico::carica(d.clone(), 0);
+        let giro = |id: &str, colpi: u32, t: i64| {
+            let mut g = giro_di_prova(colpi, t);
+            g.scenario = id.into();
+            g
+        };
+        s.aggiungi(giro("scatto", 30, 1), ora(1)).1.unwrap();
+        s.aggiungi(giro("terna", 20, 2), ora(2)).1.unwrap();
+        s.aggiungi(giro("scatto", 25, 3), ora(3)).1.unwrap();
+        s.aggiungi(giro("deriva", 0, 4), ora(4)).1.unwrap();
+        s.aggiungi(giro("terna", 22, 5), ora(5)).1.unwrap();
+        let mut cambiato = giro("scatto", 99, 6);
+        cambiato.parametri.dimensione = 2.0;
+        s.aggiungi(cambiato, ora(6)).1.unwrap();
+        // Riavvio: tutto dai file.
+        let s = Storico::carica(d.clone(), 0);
+        assert_eq!(s.ultimi_giocati(10), ["scatto", "terna", "deriva"]);
+        assert_eq!(s.ultimi_giocati(2), ["scatto", "terna"]);
+        let r: Vec<(&str, f64)> =
+            s.record_recenti(10).iter().map(|g| (g.scenario.as_str(), g.punteggio())).collect();
+        assert_eq!(
+            r,
+            [("terna", 22.0), ("terna", 20.0), ("scatto", 30.0)],
+            "niente zero né parametri cambiati"
+        );
+        assert_eq!(s.record_recenti(1).len(), 1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn i_giri_del_formato_1_si_leggono_ancora() {
