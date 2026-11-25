@@ -99,6 +99,12 @@ impl Regole {
         self.velocita *= p.velocita;
         self
     }
+
+    /// I parametri che contano davvero per questo scenario: con le sfere ferme la velocità non cambia niente, quindi
+    /// vale come standard (e il giro può fare record).
+    pub fn parametri_che_valgono(&self, p: Parametri) -> Parametri {
+        if self.movimento == TipoMovimento::Fermo { Parametri { velocita: 1.0, ..p } } else { p }
+    }
 }
 
 /// I parametri regolabili nel menu, uguali per tutti gli scenari: 1 = come dice lo scenario.
@@ -314,7 +320,10 @@ pub fn leggi(testo: &str) -> Result<Scenario, String> {
     let f: File = toml::from_str(testo).map_err(|e| {
         let m = e.message().trim().to_string();
         match e.span() {
-            Some(s) => format!("riga {}: {m}", testo[..s.start.min(testo.len())].lines().count().max(1)),
+            Some(s) => format!(
+                "riga {}: {m}",
+                testo.as_bytes()[..s.start.min(testo.len())].iter().filter(|b| **b == b'\n').count() + 1
+            ),
             None => m,
         }
     })?;
@@ -341,6 +350,13 @@ pub fn leggi(testo: &str) -> Result<Scenario, String> {
     }
     fra("bersagli.raggio", f.bersagli.raggio, 0.05, 2.0)?;
     fra("bersagli.distanza", f.bersagli.distanza, 3.0, 16.0)?;
+    // Anche con la dimensione al massimo la sfera resta piccola rispetto alla distanza: l'occhio non le entra dentro.
+    if f.bersagli.raggio * LIMITI_PARAMETRO.1 > f.bersagli.distanza / 4.0 {
+        return Err(format!(
+            "bersagli.raggio = {} troppo grande per distanza = {}: al più un ottavo della distanza",
+            f.bersagli.raggio, f.bersagli.distanza
+        ));
+    }
     fra("bersagli.distanza_minima_gradi", f.bersagli.distanza_minima_gradi, 0.0, 40.0)?;
     fra("bersagli.ritardo_min_ms", f.bersagli.ritardo_min_ms, 0.0, 10_000.0)?;
     fra("bersagli.ritardo_max_ms", f.bersagli.ritardo_max_ms, f.bersagli.ritardo_min_ms, 10_000.0)?;
@@ -596,5 +612,24 @@ beccheggio_max_gradi = 10
         let r = di_aimpro().into_iter().find(|s| s.id == "deriva").unwrap().regole;
         let c = r.con(Parametri { dimensione: 1.5, velocita: 2.0 });
         assert!((c.raggio - r.raggio * 1.5).abs() < 1e-12 && (c.velocita - r.velocita * 2.0).abs() < 1e-12);
+        // Con le sfere ferme la velocità non conta: il giro resta standard.
+        let veloce = Parametri { dimensione: 1.0, velocita: 1.5 };
+        let scatto = di_aimpro().into_iter().find(|s| s.id == "scatto").unwrap().regole;
+        assert!(scatto.parametri_che_valgono(veloce).standard());
+        assert!(!r.parametri_che_valgono(veloce).standard());
+    }
+
+    #[test]
+    fn l_avviso_dice_la_riga_giusta() {
+        let t = MIO.replacen('\n', "\n\n\n\ncolore = \"rosso\"\n", 1);
+        let riga = t.lines().position(|l| l.starts_with("colore")).unwrap() + 1;
+        assert!(leggi(&t).unwrap_err().starts_with(&format!("riga {riga}:")), "{}", leggi(&t).unwrap_err());
+    }
+
+    #[test]
+    fn una_sfera_troppo_grande_per_la_distanza_non_si_legge() {
+        // Al 200% sarebbe una sfera di 4 m a 3 m dall'occhio.
+        let t = MIO.replace("raggio = 0.5", "raggio = 2.0\ndistanza = 3.0");
+        assert!(leggi(&t).unwrap_err().contains("troppo grande"), "{:?}", leggi(&t).err());
     }
 }

@@ -317,6 +317,8 @@ impl Banco {
                 let limite = (app.hz_schermo * limite_per_hz).round() as u32;
                 app.imposta_vsync_e_limite(vsync, limite);
                 app.scegli_scenario(scenario);
+                // Il banco misura il giro col punteggio dal vivo acceso (il caso che costa di più).
+                app.config.punteggio_dal_vivo = true;
                 app.inizia_giro();
                 // Il conto alla rovescia non si misura: il giro parte subito.
                 app.salta_conto();

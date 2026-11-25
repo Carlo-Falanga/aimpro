@@ -36,9 +36,10 @@ pub struct Riepilogo {
 }
 
 impl Riepilogo {
-    /// Il punteggio del giro: i colpi, o la percentuale del tracking.
+    /// Il punteggio del giro: i colpi, o la percentuale del tracking al decimo, come si mostra (così un record
+    /// nuovo non compare mai "pari al record").
     pub fn punteggio(&self) -> f64 {
-        self.tracking.map_or(f64::from(self.colpi), |t| t * 100.0)
+        self.tracking.map_or(f64::from(self.colpi), |t| (t * 1000.0).round() / 10.0)
     }
 }
 
@@ -105,6 +106,8 @@ pub struct Giro {
     /// I centri all'ultimo `avanza`, e il suo tempo di gioco.
     centri: [DVec3; MAX_SFERE],
     tg: f64,
+    /// All'ultimo `avanza` il conto alla rovescia era finito: prima le sfere non si vedono e non si guardano.
+    partito: bool,
     /// Cresce a ogni tratto nuovo: chi disegna riscrive il buffer delle sfere solo quando cambia.
     pub versione: u64,
     /// Istante (ms) in cui parte il tempo di gioco; durante il conto alla rovescia è nel futuro. Si sposta in avanti
@@ -137,6 +140,7 @@ impl Giro {
             sfere: [Sfera::default(); MAX_SFERE],
             centri: [occhio + DVec3::NEG_Z * regole.distanza; MAX_SFERE],
             tg: 0.0,
+            partito: false,
             versione: 0,
             inizio: 0.0,
             inizio_pausa: 0.0,
@@ -178,7 +182,7 @@ impl Giro {
 
     /// La sfera `i` si vede, all'ultimo `avanza`?
     pub fn visibile(&self, i: usize) -> bool {
-        self.tg >= self.sfere[i].comparsa
+        self.partito && self.tg >= self.sfere[i].comparsa
     }
 
     /// Il giro parte con il conto alla rovescia: il tempo di gioco comincia fra `CONTO_MS`.
@@ -192,6 +196,7 @@ impl Giro {
         self.in_corso = true;
         self.in_pausa = false;
         self.inizio = t + CONTO_MS;
+        self.partito = false;
         self.tracciato = t;
         self.colpita = self.occhio;
         for i in 0..self.regole.sfere {
@@ -284,6 +289,7 @@ impl Giro {
             self.centri[i] = self.centro_a(i, tg);
         }
         self.tg = tg;
+        self.partito = self.in_corso && t >= self.inizio;
     }
 
     /// Gli angoli della sfera `i` al tempo di gioco `tg`.
@@ -388,6 +394,19 @@ impl Giro {
         self.tracciato = self.tracciato.max(t);
     }
 
+    /// Punteggio e precisione dal vivo, in interi per il disegno: i colpi e la precisione in percento (senza clic,
+    /// `None`); nel tracking la percentuale del tempo giocato finora con il mirino sulla sfera, e niente precisione.
+    pub fn dal_vivo(&self, t: f64) -> (u32, Option<u32>) {
+        if self.regole.tracking() {
+            let giocato = self.tempo_di_gioco(t);
+            let p = if giocato > 0.0 { (self.sul_bersaglio_ms / giocato).clamp(0.0, 1.0) } else { 0.0 };
+            return ((p * 100.0).round() as u32, None);
+        }
+        let clic = self.colpi + self.errori;
+        let precisione = (clic > 0).then(|| (f64::from(self.colpi) * 100.0 / f64::from(clic)).round() as u32);
+        (self.colpi, precisione)
+    }
+
     pub fn riepilogo(&self) -> Riepilogo {
         let clic = self.colpi + self.errori;
         let tracking = self.regole.tracking();
@@ -431,13 +450,27 @@ impl Giro {
             Tratto { imbardata: scelta.0, beccheggio: scelta.1, t0: comparsa, ..Tratto::default() };
         if r.movimento != TipoMovimento::Fermo {
             let direzione = self.caso.prossimo() * std::f64::consts::TAU;
-            tratto.v_imbardata = r.velocita * direzione.cos();
-            tratto.v_beccheggio = r.velocita * direzione.sin();
+            (tratto.v_imbardata, tratto.v_beccheggio) = self.velocita_verso(direzione);
         }
         self.sfere[i].tratto = tratto;
         self.sfere[i].comparsa = comparsa;
         self.sfere[i].cambio = comparsa + self.intervallo_cambio();
         self.versione += 1;
+    }
+
+    /// La velocità dello scenario nella `direzione` (radianti, 0 = verso destra). Se la zona è senza altezza (o senza
+    /// larghezza) tutta la velocità va sull'altro asse: altrimenti la parte persa contro il bordo farebbe una sfera più
+    /// lenta a caso, e un record che dipende dalla fortuna.
+    fn velocita_verso(&self, direzione: f64) -> (f64, f64) {
+        let r = self.regole;
+        let segno = |x: f64| if x < 0.0 { -1.0 } else { 1.0 };
+        if r.beccheggio_max - r.beccheggio_min < 1e-9 {
+            (r.velocita * segno(direzione.cos()), 0.0)
+        } else if r.imbardata_max < 1e-9 {
+            (0.0, r.velocita * segno(direzione.sin()))
+        } else {
+            (r.velocita * direzione.cos(), r.velocita * direzione.sin())
+        }
     }
 
     fn intervallo_cambio(&mut self) -> f64 {
@@ -450,20 +483,13 @@ impl Giro {
 
     /// Al tempo di gioco `tg` la sfera `i` gira di colpo: fra 60 e 300 gradi rispetto a dove stava andando.
     fn cambia_direzione(&mut self, i: usize, tg: f64) {
-        let r = self.regole;
         let (imb, bec) = self.angoli_a(i, tg);
         // La direzione in cui andava davvero, dopo i rimbalzi: la si ricava da due istanti vicini.
         let (imb2, bec2) = self.angoli_a(i, tg + 1.0);
         let attuale = (bec2 - bec).atan2(imb2 - imb);
         let svolta = (60.0 + self.caso.prossimo() * 240.0).to_radians();
-        let direzione = attuale + svolta;
-        self.sfere[i].tratto = Tratto {
-            imbardata: imb,
-            beccheggio: bec,
-            v_imbardata: r.velocita * direzione.cos(),
-            v_beccheggio: r.velocita * direzione.sin(),
-            t0: tg,
-        };
+        let (v_imbardata, v_beccheggio) = self.velocita_verso(attuale + svolta);
+        self.sfere[i].tratto = Tratto { imbardata: imb, beccheggio: bec, v_imbardata, v_beccheggio, t0: tg };
         self.sfere[i].cambio = tg + self.intervallo_cambio();
         self.versione += 1;
     }
@@ -831,25 +857,85 @@ pub mod test {
 
     #[test]
     fn con_tre_sfere_in_movimento_conta_la_visuale_dell_istante_del_clic() {
-        let mut g = partito("sciame", 22, 0.0);
-        // Dove sarà la sfera 1 a 1234 ms: si mira lì, il frame dopo (a 1250 ms) è già spostata.
-        g.avanza(1234.0);
-        let al_clic = mira_a(&g, 1);
-        let centro_al_clic = g.centro(1);
-        g.avanza(1250.0);
-        let al_frame = mira_a(&g, 1);
-        assert!(al_clic.dot(al_frame) < 1.0 - 1e-9, "la sfera si è mossa");
-        assert_eq!(g.clic(1234.0, al_clic), Esito::Colpo);
-        assert_eq!(g.colpita(), centro_al_clic);
-        // Con la visuale del frame, a un istante di molto prima, la stessa sfera non si colpisce più.
-        let mut h = partito("sciame", 22, 0.0);
-        h.avanza(200.0);
-        let lontana = mira_a(&h, 1);
-        let mut k = partito("sciame", 22, 0.0);
-        let r = k.regole.raggio / k.regole.distanza;
-        if lontana.dot(al_clic).clamp(-1.0, 1.0).acos() > 2.0 * r {
-            assert_ne!(k.clic(1234.0, lontana), Esito::Colpo);
+        for id in ["sciame", "stormo"] {
+            let mut g = partito(id, 22, 0.0);
+            let r = g.regole.raggio / g.regole.distanza;
+            // L'ultimo frame è a 1000 ms; il clic arriva a 1600 ms, con la mira dove una sfera è in quell'istante.
+            g.avanza(1000.0);
+            let mut futuro = g.clone();
+            futuro.avanza(1600.0);
+            // La sfera che fra il frame e il clic si è spostata di più: oltre due raggi, così con le posizioni del
+            // frame il clic sarebbe a vuoto.
+            let spostamento = |i: usize| mira_a(&g, i).dot(mira_a(&futuro, i)).clamp(-1.0, 1.0).acos();
+            let i = (0..3).max_by(|a, b| spostamento(*a).total_cmp(&spostamento(*b))).unwrap();
+            assert!(spostamento(i) > 2.0 * r, "{id}: la sfera si è mossa poco");
+            let al_clic = mira_a(&futuro, i);
+            assert_eq!(g.guarda(al_clic), None, "{id}: alle posizioni del frame è a vuoto");
+            assert_eq!(g.clic(1600.0, al_clic), Esito::Colpo, "{id}");
+            assert_eq!(g.colpita(), futuro.centro(i), "{id}");
         }
+    }
+
+    #[test]
+    fn nel_binario_la_sfera_va_sempre_alla_velocita_dello_scenario() {
+        // La zona di binario non ha altezza: tutta la velocità va in orizzontale, con ogni seme.
+        for seme in 1..=40 {
+            let mut g = partito("binario", seme, 0.0);
+            let r = g.regole;
+            assert!(r.beccheggio_max - r.beccheggio_min < 1e-9);
+            let v = velocita_angolare(&mut g, 0, 2000.0);
+            assert!(
+                v >= r.velocita * 0.95 && v <= r.velocita * 1.01,
+                "seme {seme}: {v} contro {}",
+                r.velocita
+            );
+        }
+    }
+
+    #[test]
+    fn nel_conto_alla_rovescia_le_sfere_non_si_guardano() {
+        let mut g = Giro::new(OCCHIO, Caso::new(9), regole("scatto"));
+        g.inizia(0.0);
+        g.avanza(1000.0);
+        let d = mira_a(&g, 0);
+        assert_eq!(g.guarda(d), None, "nel conto la sfera non c'è");
+        assert!(!g.visibile(0));
+        g.avanza(CONTO_MS + 1.0);
+        assert_eq!(g.guarda(d), Some(0));
+    }
+
+    #[test]
+    fn il_punteggio_del_tracking_e_al_decimo_come_si_mostra() {
+        let r = |t: f64| Riepilogo {
+            colpi: 0,
+            errori: 0,
+            precisione: None,
+            tempo_medio_ms: None,
+            tracking: Some(t),
+        };
+        assert_eq!(r(0.70004).punteggio(), 70.0);
+        assert_eq!(r(0.70051).punteggio(), 70.1);
+        assert_eq!(r(1.0).punteggio(), 100.0);
+    }
+
+    #[test]
+    fn il_punteggio_dal_vivo_segue_colpi_errori_e_tracking() {
+        let mut g = partito("scatto", 3, 0.0);
+        assert_eq!(g.dal_vivo(0.0), (0, None), "senza clic niente precisione");
+        assert_eq!(g.clic(100.0, mira_a(&g, 0)), Esito::Colpo);
+        assert_eq!(g.clic(200.0, mira_a(&g, 0)), Esito::Colpo);
+        assert_eq!(g.clic(300.0, -mira_a(&g, 0)), Esito::Errore);
+        assert_eq!(g.dal_vivo(300.0), (2, Some(67)));
+
+        let mut g = partito("filo", 5, 0.0);
+        g.tasto(0.0, true, mira_a(&g, 0));
+        for ms in 1..=1000 {
+            let t = f64::from(ms);
+            g.avanza(t);
+            let d = if ms <= 500 { mira_a(&g, 0) } else { -mira_a(&g, 0) };
+            g.traccia(t, d);
+        }
+        assert_eq!(g.dal_vivo(1000.0), (50, None), "metà del tempo giocato finora");
     }
 
     #[test]

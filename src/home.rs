@@ -282,7 +282,7 @@ fn gioca(ui: &mut Ui, h: &mut Home, c: &mut Config, info: &InfoHome) -> Azione {
                 .color(TENUE),
             );
             ui.label(interfaccia::spiegazione(&s));
-            if !c.parametri().standard() {
+            if !s.regole.parametri_che_valgono(c.parametri()).standard() {
                 ui.label(
                     RichText::new("Parametri cambiati: i giri si salvano ma non fanno record.")
                         .color(AVVISO)

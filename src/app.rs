@@ -214,8 +214,8 @@ impl App {
             home: Home::default(),
             home_pagina_prima: Pagina::Gioca,
             registro: Registro::new(OCCHIO),
-            storico: None,
-            // Il banco non usa lo storico: niente lettura che si mescoli alle sue misure.
+            // Il banco non usa lo storico: niente lettura che si mescoli alle sue misure. La home ne ha uno vuoto.
+            storico: banco.is_some().then(|| Storico::vuoto(avvio)),
             storico_in_arrivo: banco
                 .is_none()
                 .then(|| std::thread::spawn(move || Storico::carica(storico::cartella_predefinita(), avvio))),
@@ -354,7 +354,8 @@ impl App {
         self.beccheggio = 0.0;
         // Il giro nuovo si prepara qui, fuori dal frame: le sue sfere stanno in un vettore fisso, niente allocazioni.
         self.scenario_giro = self.indice_scenario();
-        self.parametri_giro = self.config.parametri();
+        self.parametri_giro =
+            self.scenari[self.scenario_giro].regole.parametri_che_valgono(self.config.parametri());
         let regole = self.scenari[self.scenario_giro].regole.con(self.parametri_giro);
         self.giro = Giro::new(OCCHIO, Caso::new(tempo::qpc() as u64), regole);
         self.giro.inizia(self.ms(tempo::qpc()));
@@ -543,6 +544,7 @@ impl App {
             tempo: nel_giro
                 .then(|| ((restante / 1000.0).ceil() as u32, (restante / self.giro.durata_ms()) as f32)),
             conto,
+            dal_vivo: (nel_giro && self.config.punteggio_dal_vivo).then(|| self.giro.dal_vivo(tempo_ms)),
         }
     }
 

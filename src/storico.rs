@@ -231,6 +231,11 @@ fn leggi(percorso: &Path) -> Option<GiroSalvato> {
 }
 
 impl Storico {
+    /// Uno storico senza giri e senza cartella, che non scrive niente (per il banco).
+    pub fn vuoto(avvio_ms: i64) -> Self {
+        Storico { cartella: PathBuf::new(), giri: Vec::new(), saltati: 0, avvio_ms }
+    }
+
     /// Legge tutti i giri della cartella. Una cartella che non c'è è uno storico vuoto.
     pub fn carica(cartella: PathBuf, avvio_ms: i64) -> Self {
         let mut giri = Vec::new();

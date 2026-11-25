@@ -494,7 +494,7 @@ pub fn parametri_scenario(ui: &mut Ui, c: &mut Config, s: &Scenario) -> bool {
         });
         ui.end_row();
     });
-    if c.parametri().standard() {
+    if s.regole.parametri_che_valgono(c.parametri()).standard() {
         ui.label(RichText::new("Parametri standard: i giri fanno record.").color(TENUE).size(13.0));
     } else {
         ui.horizontal(|ui| {

@@ -159,11 +159,16 @@ pub fn carica(percorso: &Path) -> (Config, Option<String>) {
     match std::fs::read_to_string(percorso) {
         Ok(testo) => match toml::from_str::<Config>(&testo) {
             Ok(c) => (con_predefiniti_del_gioco(c, &testo).normalizzata(), None),
-            Err(e) => (Config::default(), Some(format!("impostazioni illeggibili, uso i predefiniti: {e}"))),
+            Err(e) => (gia_avviato(), Some(format!("impostazioni illeggibili, uso i predefiniti: {e}"))),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Config::default(), None),
-        Err(e) => (Config::default(), Some(format!("impostazioni non lette: {e}"))),
+        Err(e) => (gia_avviato(), Some(format!("impostazioni non lette: {e}"))),
     }
+}
+
+/// I predefiniti per chi ha già un file che non si legge: non è il primo avvio, e l'avviso deve vedersi nella home.
+fn gia_avviato() -> Config {
+    Config { primo_avvio_fatto: true, ..Config::default() }
 }
 
 /// Scrive le impostazioni: prima in un file accanto, poi lo rinomina, così un'interruzione non lascia il file
@@ -229,7 +234,11 @@ mod test {
         let p = d.join("config.toml");
         std::fs::write(&p, "gioco = [non toml").unwrap();
         let (c, errore) = carica(&p);
-        assert_eq!(c, Config::default());
+        assert_eq!(
+            c,
+            Config { primo_avvio_fatto: true, ..Config::default() },
+            "predefiniti, senza il primo avvio"
+        );
         assert!(errore.is_some());
     }
 

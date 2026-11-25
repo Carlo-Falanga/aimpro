@@ -21,7 +21,11 @@ use winit::window::Window;
 
 pub use crate::scenari::MAX_SFERE;
 
-const MAX_RETT: usize = 64;
+/// Punteggio e precisione in percento del giro, per il disegno.
+pub type DalVivo = Option<(u32, Option<u32>)>;
+
+/// Mirino 8, tempo 16, conto alla rovescia 7, punteggio dal vivo fino a 42: c'è margine.
+const MAX_RETT: usize = 128;
 /// Descrittori di texture e buffer che gli shader possono vedere insieme: ne usiamo meno di dieci (le uniformi e
 /// le texture di egui); 16 384 lasciano un margine largo e costano 0,5 MB.
 const DESCRITTORI: u32 = 16_384;
@@ -45,7 +49,8 @@ const DIMENSIONE_IMMEDIATI: u32 = 128;
 const _: () = assert!(std::mem::size_of::<Immediati>() as u32 <= DIMENSIONE_IMMEDIATI);
 
 /// Una sfera per lo shader: il tratto di moto (`moto` = imbardata e beccheggio di partenza, velocità in radianti al
-/// secondo; `altro` = istante di partenza in secondi di gioco, raggio, distanza, libero).
+/// secondo; `altro` = istante di partenza in secondi di gioco, raggio, distanza, istante di comparsa in secondi di
+/// gioco: prima la sfera non si disegna).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, PartialEq, Debug, Default)]
 pub struct SferaGpu {
@@ -93,6 +98,8 @@ pub struct Scena {
     pub tempo: Option<(u32, f32)>,
     /// Il conto alla rovescia (3, 2, 1) al centro, prima del giro.
     pub conto: Option<u32>,
+    /// Punteggio e precisione in percento, in alto a sinistra; `None` se spento o fuori dal giro.
+    pub dal_vivo: DalVivo,
 }
 
 /// Il disegno di egui da aggiungere sopra la scena.
@@ -131,8 +138,9 @@ pub struct Grafica {
     gruppo: wgpu::BindGroup,
     rett: [Rett; MAX_RETT],
     n_rett: usize,
-    /// Secondi, conto alla rovescia e dimensioni dell'ultima scrittura dei rettangoli; se cambiano si riscrivono.
-    rett_scritti: (u32, u32, u32, u32, bool),
+    /// Secondi, conto alla rovescia, dimensioni e punteggio dal vivo dell'ultima scrittura dei rettangoli; se
+    /// cambiano si riscrivono.
+    rett_scritti: (u32, u32, u32, u32, bool, DalVivo),
     scala: f32,
 }
 
@@ -361,7 +369,7 @@ impl Grafica {
             gruppo,
             rett: [Rett::default(); MAX_RETT],
             n_rett: 0,
-            rett_scritti: (u32::MAX, 0, 0, 0, false),
+            rett_scritti: (u32::MAX, 0, 0, 0, false, None),
             scala: finestra_scala(),
         })
     }
@@ -374,7 +382,7 @@ impl Grafica {
         self.config.height = altezza;
         self.scala = scala.max(1.0);
         self.surface.configure(&self.device, &self.config);
-        self.rett_scritti = (u32::MAX, 0, 0, 0, false);
+        self.rett_scritti = (u32::MAX, 0, 0, 0, false, None);
     }
 
     pub fn imposta_vsync(&mut self, vsync: bool) {
@@ -441,9 +449,10 @@ impl Grafica {
                 self.uniformi_scritte = Some(u);
             }
             let conto = s.conto.unwrap_or(0);
-            let chiave = (secondi, conto, self.config.width, self.config.height, s.tempo.is_some());
+            let chiave =
+                (secondi, conto, self.config.width, self.config.height, s.tempo.is_some(), s.dal_vivo);
             if chiave != self.rett_scritti {
-                self.prepara_rettangoli(s.tempo.map(|t| t.0), s.conto);
+                self.prepara_rettangoli(s.tempo.map(|t| t.0), s.conto, s.dal_vivo);
                 self.queue.write_buffer(&self.b_rett, 0, bytemuck::cast_slice(&self.rett[..self.n_rett]));
                 self.rett_scritti = chiave;
             }
@@ -512,7 +521,7 @@ impl Grafica {
         }
     }
 
-    fn prepara_rettangoli(&mut self, secondi: Option<u32>, conto: Option<u32>) {
+    fn prepara_rettangoli(&mut self, secondi: Option<u32>, conto: Option<u32>, dal_vivo: DalVivo) {
         self.n_rett = 0;
         let s = self.scala;
         let (w, h) = (self.config.width as f32, self.config.height as f32);
@@ -553,9 +562,14 @@ impl Grafica {
             let t = (4.0 * s).round().max(2.0);
             let spazio = (7.0 * s).round();
             let y = (22.0 * s).round();
-            let n = sec.min(99);
-            self.cifra(n / 10, (cx - cw - spazio / 2.0).round(), y, cw, ch, t);
-            self.cifra(n % 10, (cx + spazio / 2.0).round(), y, cw, ch, t);
+            if sec >= 100 {
+                // Gli scenari dei file possono durare fino a 300 secondi: tre cifre, centrate.
+                let largo = 3.0 * cw + 2.0 * (6.0 * s).round();
+                self.numero(sec, (cx - largo / 2.0).round(), y, cw, ch, t, [0.92, 0.92, 0.92, 0.9]);
+            } else {
+                self.cifra(sec / 10, (cx - cw - spazio / 2.0).round(), y, cw, ch, t);
+                self.cifra(sec % 10, (cx + spazio / 2.0).round(), y, cw, ch, t);
+            }
             let lb = (220.0 * s).round();
             let hb = (3.0 * s).round().max(2.0);
             let yb = y + ch + (10.0 * s).round();
@@ -570,13 +584,62 @@ impl Grafica {
             let t = (14.0 * s).round().max(4.0);
             self.cifra(n % 10, (cx - cw / 2.0).round(), (cy - ch - 60.0 * s).round(), cw, ch, t);
         }
+        if let Some((punti, precisione)) = dal_vivo {
+            // In alto a sinistra: il punteggio grande e, sotto, la precisione in percento più piccola, in arancio.
+            let x = (28.0 * s).round();
+            let y = (22.0 * s).round();
+            let (ch, cw, t) = ((30.0 * s).round(), (17.0 * s).round(), (4.0 * s).round().max(2.0));
+            self.numero(punti, x, y, cw, ch, t, [0.92, 0.92, 0.92, 0.9]);
+            if let Some(p) = precisione {
+                let (ph, pw, pt) = ((18.0 * s).round(), (10.0 * s).round(), (3.0 * s).round().max(2.0));
+                let yp = y + ch + (10.0 * s).round();
+                let fine = self.numero(p, x, yp, pw, ph, pt, [1.0, 0.69, 0.13, 0.95]);
+                // Il segno di percento: due quadratini e, fra loro, una diagonale a gradini.
+                let arancio = [1.0, 0.69, 0.13, 0.95];
+                let q = pt + 1.0;
+                let xs = fine + (5.0 * s).round();
+                let lw = pw + 2.0 * q;
+                self.aggiungi(xs, yp, q, q, arancio, 0.0);
+                self.aggiungi(xs + lw - q, yp + ph - q, q, q, arancio, 0.0);
+                for i in 0..5 {
+                    let f = i as f32 / 4.0;
+                    let x = (xs + f * (lw - pt)).round();
+                    let y = (yp + ph - pt - f * (ph - pt)).round();
+                    self.aggiungi(x, y, pt, pt, arancio, 0.0);
+                }
+            }
+        }
+    }
+
+    /// Un numero intero (al massimo 3 cifre, senza zeri davanti) da `x` verso destra; dice dove finisce.
+    #[allow(clippy::too_many_arguments)]
+    fn numero(&mut self, n: u32, x: f32, y: f32, w: f32, h: f32, t: f32, colore: [f32; 4]) -> f32 {
+        let n = n.min(999);
+        let cifre = if n >= 100 {
+            3
+        } else if n >= 10 {
+            2
+        } else {
+            1
+        };
+        let passo = w + (6.0 * self.scala).round();
+        let mut resto = n;
+        for i in (0..cifre).rev() {
+            self.cifra_colore(resto % 10, x + i as f32 * passo, y, w, h, t, colore);
+            resto /= 10;
+        }
+        x + cifre as f32 * passo - (6.0 * self.scala).round()
     }
 
     fn cifra(&mut self, n: u32, x: f32, y: f32, w: f32, h: f32, t: f32) {
+        self.cifra_colore(n, x, y, w, h, t, [0.92, 0.92, 0.92, 0.9]);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cifra_colore(&mut self, n: u32, x: f32, y: f32, w: f32, h: f32, t: f32, c: [f32; 4]) {
         let m = SEGMENTI[n as usize % 10];
         let meta = h / 2.0;
         let lato = meta - 1.5 * t;
-        let c = [0.92, 0.92, 0.92, 0.9];
         let segmenti = [
             (0b1000000, x + t, y, w - 2.0 * t, t),
             (0b0100000, x + w - t, y + t, t, lato),
