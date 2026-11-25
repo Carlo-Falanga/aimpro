@@ -249,10 +249,12 @@ mod wasapi {
             genera(super::Suono::Comparsa, FREQUENZA),
         ];
         let mut visti = [0u32; 3];
+        // Fuori dal flusso: se l'uscita si rompe a metà, i suoni già presi ripartono sull'uscita nuova.
+        let mut voci = [Voce::default(); VOCI];
         loop {
             dormi(s, &visti, sveglia);
             let mut aperto = false;
-            let Err(e) = flusso(s, &mut visti, &campioni, &mut aperto) else {
+            let Err(e) = flusso(s, &mut visti, &mut voci, &campioni, &mut aperto) else {
                 continue;
             };
             // Un flusso che funzionava e si è rotto (cuffie staccate): si riapre subito, coi suoni ancora da fare.
@@ -260,7 +262,7 @@ mod wasapi {
                 // Un attimo perché Windows passi all'altra uscita predefinita.
                 std::thread::sleep(std::time::Duration::from_millis(150));
                 let mut di_nuovo = false;
-                match flusso(s, &mut visti, &campioni, &mut di_nuovo) {
+                match flusso(s, &mut visti, &mut voci, &campioni, &mut di_nuovo) {
                     Ok(()) => continue,
                     Err(e) => e,
                 }
@@ -271,6 +273,7 @@ mod wasapi {
             s.guasto.store(true, Ordering::Release);
             std::thread::sleep(std::time::Duration::from_millis(500));
             // Le richieste arrivate mentre l'uscita mancava (anche durante la pausa) non si suonano dopo.
+            voci = [Voce::default(); VOCI];
             for (v, r) in visti.iter_mut().zip(&s.richieste) {
                 *v = r.load(Ordering::SeqCst);
             }
@@ -281,6 +284,7 @@ mod wasapi {
     fn flusso(
         s: &Suoni,
         visti: &mut [u32; 3],
+        voci: &mut [Voce; VOCI],
         campioni: &[Vec<f32>; 3],
         aperto: &mut bool,
     ) -> Result<(), String> {
@@ -327,7 +331,6 @@ mod wasapi {
             let periodo_ms = ((periodo_100ns / 10_000) as u32).max(1);
             s.guasto.store(false, Ordering::Release);
 
-            let mut voci = [Voce::default(); VOCI];
             let mut misto = vec![0f32; lato * CANALI];
             let mut partito = false;
             let mut silenzio_ms = 0u32;
@@ -339,7 +342,7 @@ mod wasapi {
                     let n = r.load(Ordering::SeqCst);
                     while visti[i] != n {
                         visti[i] = visti[i].wrapping_add(1);
-                        aggiungi(&mut voci, i);
+                        aggiungi(voci, i);
                         nuove = true;
                     }
                 }
@@ -355,7 +358,7 @@ mod wasapi {
                 if liberi > 0 {
                     let dati = render.GetBuffer(liberi as u32).map_err(e("audio"))?;
                     let parte = &mut misto[..liberi * CANALI];
-                    let resta = mescola(&mut voci, campioni, guadagno(s.volume()), parte);
+                    let resta = mescola(voci, campioni, guadagno(s.volume()), parte);
                     std::ptr::copy_nonoverlapping(parte.as_ptr(), dati.cast::<f32>(), parte.len());
                     render.ReleaseBuffer(liberi as u32, 0).map_err(e("audio"))?;
                     if !resta {
