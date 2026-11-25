@@ -13,7 +13,6 @@ mod app;
 mod banco;
 mod camera;
 mod config;
-mod esporta;
 mod giro;
 mod grafica;
 mod ingresso;
@@ -22,8 +21,10 @@ mod latenza;
 mod misure;
 mod registro;
 mod rete;
+mod schermata_statistiche;
 mod sensibilita;
 mod sistema;
+mod statistiche;
 mod storico;
 mod tempo;
 

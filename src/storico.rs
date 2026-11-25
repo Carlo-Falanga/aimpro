@@ -1,5 +1,5 @@
 //! Lo storico dei giri: un file TOML per giro in `%APPDATA%\aimpro\storico\`, scritto a giro finito (fuori dal
-//! frame), e i conti che ne vengono: record per scenario, sessione, ultimi giri.
+//! frame), e il record per scenario. Le altre statistiche stanno in `statistiche.rs`.
 //!
 //! Il formato (versione `FORMATO`) è descritto nel `CLAUDE.md` del repo: scenari e playlist ci si appoggiano.
 //! Un file che non si legge, o di un formato più nuovo, si salta e si conta: l'avvio non si ferma.
@@ -165,21 +165,12 @@ impl Confronto {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Sessione {
-    pub giri: usize,
-    pub media_colpi: Option<f64>,
-    pub migliore: Option<u32>,
-}
-
 pub struct Storico {
     cartella: PathBuf,
     /// Dal più vecchio al più recente, senza i bersagli.
     giri: Vec<GiroSalvato>,
     /// File trovati e non letti (rovinati, o di un formato più nuovo).
     pub saltati: u32,
-    /// Quando è partito aimpro: i giri da qui in poi sono la sessione.
-    avvio_ms: i64,
 }
 
 /// `%APPDATA%\aimpro\storico`, accanto alle impostazioni.
@@ -188,15 +179,23 @@ pub fn cartella_predefinita() -> PathBuf {
     config.parent().map_or_else(|| PathBuf::from("storico"), |p| p.join("storico"))
 }
 
-fn leggi(percorso: &Path) -> Option<GiroSalvato> {
+/// Un giro intero dal suo file; `None` se non si legge o è di un formato più nuovo.
+pub fn leggi(percorso: &Path) -> Option<GiroSalvato> {
     let testo = std::fs::read_to_string(percorso).ok()?;
     let g: GiroSalvato = toml::from_str(&testo).ok()?;
     (g.formato <= FORMATO && !g.scenario.is_empty()).then_some(g)
 }
 
 impl Storico {
-    /// Legge tutti i giri della cartella. Una cartella che non c'è è uno storico vuoto.
-    pub fn carica(cartella: PathBuf, avvio_ms: i64) -> Self {
+    /// Legge tutti i giri della cartella. Una cartella che non c'è è uno storico vuoto. L'app usa `carica_con`.
+    #[cfg(test)]
+    pub fn carica(cartella: PathBuf) -> Self {
+        Self::carica_con(cartella, |_, _| {})
+    }
+
+    /// Come `carica`, e passa a `ogni_giro` ogni giro letto, con i bersagli e il suo file, prima che i bersagli si
+    /// tolgano dalla memoria (le statistiche ne tengono la sintesi).
+    pub fn carica_con(cartella: PathBuf, mut ogni_giro: impl FnMut(&GiroSalvato, &Path)) -> Self {
         let mut giri = Vec::new();
         let mut saltati = 0;
         if let Ok(voci) = std::fs::read_dir(&cartella) {
@@ -207,6 +206,7 @@ impl Storico {
                 }
                 match leggi(&p) {
                     Some(mut g) => {
+                        ogni_giro(&g, &p);
                         g.bersagli = Vec::new();
                         giri.push(g);
                     }
@@ -215,9 +215,10 @@ impl Storico {
             }
         }
         giri.sort_by_key(|g| g.istante_ms);
-        Storico { cartella, giri, saltati, avvio_ms }
+        Storico { cartella, giri, saltati }
     }
 
+    #[cfg(test)]
     pub fn giri(&self) -> &[GiroSalvato] {
         &self.giri
     }
@@ -229,18 +230,6 @@ impl Storico {
     /// Il record dello scenario: i colpi del giro migliore.
     pub fn record(&self, scenario: &str) -> Option<u32> {
         self.giri_di(scenario).map(|g| g.colpi).max()
-    }
-
-    /// I giri dello scenario da quando è partito aimpro.
-    pub fn sessione(&self, scenario: &str) -> Sessione {
-        let colpi: Vec<u32> =
-            self.giri_di(scenario).filter(|g| g.istante_ms >= self.avvio_ms).map(|g| g.colpi).collect();
-        Sessione {
-            giri: colpi.len(),
-            media_colpi: (!colpi.is_empty())
-                .then(|| colpi.iter().map(|&c| f64::from(c)).sum::<f64>() / colpi.len() as f64),
-            migliore: colpi.iter().copied().max(),
-        }
     }
 
     /// Scrive il giro nel suo file e lo aggiunge allo storico; dice il confronto con il record di prima.
@@ -303,8 +292,20 @@ pub mod test {
             overshoot: 4,
             impostazioni: Impostazioni::da_config(&Config::default()),
             bersagli: vec![
-                Bersaglio { tempo_ms: 640.5, distanza_gradi: 23.25, overshoot: 1 },
-                Bersaglio { tempo_ms: 764.0, distanza_gradi: 31.0, overshoot: 0 },
+                Bersaglio {
+                    tempo_ms: 640.5,
+                    distanza_gradi: 23.25,
+                    overshoot: 1,
+                    orizzontale_gradi: Some(-20.5),
+                    verticale_gradi: Some(11.0),
+                },
+                Bersaglio {
+                    tempo_ms: 764.0,
+                    distanza_gradi: 31.0,
+                    overshoot: 0,
+                    orizzontale_gradi: Some(30.0),
+                    verticale_gradi: Some(-7.75),
+                },
             ],
         }
     }
@@ -312,7 +313,7 @@ pub mod test {
     #[test]
     fn un_giro_scritto_si_rilegge_uguale() {
         let d = cartella_di_prova("rilegge");
-        let mut s = Storico::carica(d.clone(), 0);
+        let mut s = Storico::carica(d.clone());
         let g = giro_di_prova(42, 1000);
         let (_, scritto) = s.aggiungi(g.clone(), ora(5));
         let p = scritto.unwrap();
@@ -350,6 +351,8 @@ pub mod test {
             "[[bersagli]]",
             "tempo_ms = 640.5",
             "distanza_gradi = 23.25",
+            "orizzontale_gradi = -20.5",
+            "verticale_gradi = 11.0",
         ] {
             assert!(testo.contains(campo), "manca {campo:?} in:\n{testo}");
         }
@@ -370,7 +373,7 @@ pub mod test {
     #[test]
     fn un_file_rovinato_si_salta_e_gli_altri_si_leggono() {
         let d = cartella_di_prova("rovinato");
-        let mut s = Storico::carica(d.clone(), 0);
+        let mut s = Storico::carica(d.clone());
         s.aggiungi(giro_di_prova(10, 1000), ora(1)).1.unwrap();
         s.aggiungi(giro_di_prova(20, 2000), ora(2)).1.unwrap();
         std::fs::write(d.join("rotto.toml"), "colpi = [non toml").unwrap();
@@ -380,7 +383,7 @@ pub mod test {
         std::fs::write(d.join("futuro.toml"), futuro).unwrap();
         std::fs::write(d.join("nota.txt"), "non è dello storico").unwrap();
         std::fs::write(d.join("x.toml.nuovo"), "a metà").unwrap();
-        let s = Storico::carica(d.clone(), 0);
+        let s = Storico::carica(d.clone());
         assert_eq!(s.giri().iter().map(|g| g.colpi).collect::<Vec<_>>(), [10, 20]);
         assert_eq!(s.saltati, 3);
         assert!(s.giri().iter().all(|g| g.bersagli.is_empty()), "in memoria senza bersagli");
@@ -389,7 +392,7 @@ pub mod test {
 
     #[test]
     fn senza_cartella_lo_storico_e_vuoto() {
-        let s = Storico::carica(cartella_di_prova("manca"), 0);
+        let s = Storico::carica(cartella_di_prova("manca"));
         assert!(s.giri().is_empty());
         assert_eq!((s.saltati, s.record(SCATTO)), (0, None));
     }
@@ -397,7 +400,7 @@ pub mod test {
     #[test]
     fn il_record_e_il_giro_con_piu_colpi_e_resta_dopo_un_riavvio() {
         let d = cartella_di_prova("record");
-        let mut s = Storico::carica(d.clone(), 0);
+        let mut s = Storico::carica(d.clone());
         let (c, _) = s.aggiungi(giro_di_prova(30, 1), ora(1));
         assert!(c.nuovo_record() && c.record_prima.is_none());
         let (c, _) = s.aggiungi(giro_di_prova(25, 2), ora(2));
@@ -410,35 +413,21 @@ pub mod test {
         assert!(c.nuovo_record());
         assert_eq!(c.differenza(), Some(4));
         // Riavvio: si rilegge dai file.
-        let s = Storico::carica(d.clone(), 0);
+        let s = Storico::carica(d.clone());
         assert_eq!(s.record(SCATTO), Some(34));
         assert_eq!(s.record("altro"), None);
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn la_sessione_conta_solo_i_giri_da_quando_e_partito() {
-        let d = cartella_di_prova("sessione");
-        let mut s = Storico::carica(d.clone(), 0);
-        s.aggiungi(giro_di_prova(50, 100), ora(1)).1.unwrap();
-        let mut s = Storico::carica(d.clone(), 1000);
-        assert_eq!(s.sessione(SCATTO), Sessione { giri: 0, media_colpi: None, migliore: None });
-        s.aggiungi(giro_di_prova(20, 2000), ora(2)).1.unwrap();
-        s.aggiungi(giro_di_prova(31, 3000), ora(3)).1.unwrap();
-        assert_eq!(s.sessione(SCATTO), Sessione { giri: 2, media_colpi: Some(25.5), migliore: Some(31) });
-        assert_eq!(s.record(SCATTO), Some(50), "il record guarda tutto lo storico");
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
     fn un_id_strano_non_rompe_il_nome_del_file() {
         let d = cartella_di_prova("id");
-        let mut s = Storico::carica(d.clone(), 0);
+        let mut s = Storico::carica(d.clone());
         let mut g = giro_di_prova(5, 1);
         g.scenario = "tracking 1/2.v3".to_string();
         let p = s.aggiungi(g, ora(1)).1.unwrap();
         assert_eq!(p.file_name().unwrap(), "20261122-140301-007-tracking_1_2_v3.toml");
-        assert_eq!(Storico::carica(d.clone(), 0).record("tracking 1/2.v3"), Some(5));
+        assert_eq!(Storico::carica(d.clone()).record("tracking 1/2.v3"), Some(5));
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -451,22 +440,22 @@ pub mod test {
     #[test]
     fn due_giri_nello_stesso_millesimo_non_si_sovrascrivono() {
         let d = cartella_di_prova("stesso");
-        let mut s = Storico::carica(d.clone(), 0);
+        let mut s = Storico::carica(d.clone());
         let a = s.aggiungi(giro_di_prova(1, 1), ora(1)).1.unwrap();
         let b = s.aggiungi(giro_di_prova(2, 2), ora(1)).1.unwrap();
         assert_ne!(a, b);
-        assert_eq!(Storico::carica(d.clone(), 0).giri().len(), 2);
+        assert_eq!(Storico::carica(d.clone()).giri().len(), 2);
         let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
     fn i_giri_si_ordinano_per_istante() {
         let d = cartella_di_prova("ordine");
-        let mut s = Storico::carica(d.clone(), 0);
+        let mut s = Storico::carica(d.clone());
         s.aggiungi(giro_di_prova(3, 3000), ora(1)).1.unwrap();
         s.aggiungi(giro_di_prova(1, 1000), ora(2)).1.unwrap();
         s.aggiungi(giro_di_prova(2, 2000), ora(3)).1.unwrap();
-        let s = Storico::carica(d.clone(), 0);
+        let s = Storico::carica(d.clone());
         assert_eq!(s.giri().iter().map(|g| g.colpi).collect::<Vec<_>>(), [1, 2, 3]);
         let _ = std::fs::remove_dir_all(&d);
     }
