@@ -366,6 +366,15 @@ impl App {
         self.cursore_di_gioco(true);
     }
 
+    /// R: il giro in corso (o in pausa) si butta senza salvarlo e ne parte uno nuovo dello stesso scenario; dal
+    /// riepilogo parte subito il prossimo. È un tasto voluto, non un clic di troppo: niente attesa dei pulsanti.
+    pub fn ricomincia(&mut self) {
+        if matches!(self.stato, Stato::Giro | Stato::Pausa | Stato::Riepilogo(_)) {
+            self.giro.annulla();
+            self.inizia_giro();
+        }
+    }
+
     pub fn salta_conto(&mut self) {
         if self.stato == Stato::Giro {
             self.giro.salta_conto(self.ms(tempo::qpc()));
@@ -1011,6 +1020,8 @@ impl ApplicationHandler for App {
                         Stato::Pausa => self.riprendi(),
                         _ => {}
                     },
+                    // R ricomincia lo stesso scenario da capo, dal giro, dalla pausa o dal riepilogo.
+                    PhysicalKey::Code(KeyCode::KeyR) => self.ricomincia(),
                     PhysicalKey::Code(KeyCode::F3) => {
                         self.pannello_visibile = !self.pannello_visibile;
                         self.pannello = None;
