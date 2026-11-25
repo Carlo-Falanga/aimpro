@@ -108,6 +108,10 @@ pub struct Giro {
     tg: f64,
     /// All'ultimo `avanza` il conto alla rovescia era finito: prima le sfere non si vedono e non si guardano.
     partito: bool,
+    /// Un bit per sfera: visibile all'ultimo `avanza` (una sfera colpita lo perde e lo riprende quando ricompare).
+    visibili: u8,
+    /// Quante volte una sfera è comparsa da `inizia`: il suono di comparsa parte quando cambia.
+    comparse: u32,
     /// Cresce a ogni tratto nuovo: chi disegna riscrive il buffer delle sfere solo quando cambia.
     pub versione: u64,
     /// Istante (ms) in cui parte il tempo di gioco; durante il conto alla rovescia è nel futuro. Si sposta in avanti
@@ -141,6 +145,8 @@ impl Giro {
             centri: [occhio + DVec3::NEG_Z * regole.distanza; MAX_SFERE],
             tg: 0.0,
             partito: false,
+            visibili: 0,
+            comparse: 0,
             versione: 0,
             inizio: 0.0,
             inizio_pausa: 0.0,
@@ -197,6 +203,8 @@ impl Giro {
         self.in_pausa = false;
         self.inizio = t + CONTO_MS;
         self.partito = false;
+        self.visibili = 0;
+        self.comparse = 0;
         self.tracciato = t;
         self.colpita = self.occhio;
         for i in 0..self.regole.sfere {
@@ -290,6 +298,13 @@ impl Giro {
         }
         self.tg = tg;
         self.partito = self.in_corso && t >= self.inizio;
+        for i in 0..self.regole.sfere {
+            let bit = 1u8 << i;
+            if self.visibile(i) && self.visibili & bit == 0 {
+                self.comparse = self.comparse.wrapping_add(1);
+            }
+            self.visibili = if self.visibile(i) { self.visibili | bit } else { self.visibili & !bit };
+        }
     }
 
     /// Gli angoli della sfera `i` al tempo di gioco `tg`.
@@ -324,6 +339,11 @@ impl Giro {
             }
         }
         scelta
+    }
+
+    /// Quante volte una sfera è comparsa (diventata visibile) da `inizia`.
+    pub fn comparse(&self) -> u32 {
+        self.comparse
     }
 
     /// Il centro della sfera dell'ultimo colpo, all'istante del colpo.
@@ -367,6 +387,8 @@ impl Giro {
                 self.ultimo_colpo = tg;
                 self.colpita = self.centri[i];
                 self.nuova_sfera(i, tg, false);
+                // La sfera nuova è un'altra comparsa, anche se si vede subito.
+                self.visibili &= !(1u8 << i);
                 self.centri[i] = self.centro_a(i, tg);
                 Esito::Colpo
             }
@@ -963,6 +985,37 @@ pub mod test {
         assert!((g.riepilogo().tempo_medio_ms.unwrap() - 250.0).abs() < 1e-9);
         let dopo = g.comparsa(0) - (attesa + 250.0);
         assert!((r.ritardo_min_ms..=r.ritardo_max_ms).contains(&dopo), "{dopo}");
+    }
+
+    #[test]
+    fn le_comparse_si_contano_quando_la_sfera_si_vede() {
+        // Nel conto alla rovescia nessuna comparsa; alla partenza una per sfera.
+        let mut g = Giro::new(OCCHIO, Caso::new(29), regole("terna"));
+        g.inizia(0.0);
+        g.avanza(CONTO_MS - 1.0);
+        assert_eq!(g.comparse(), 0);
+        g.avanza(CONTO_MS);
+        assert_eq!(g.comparse(), 3);
+        g.avanza(CONTO_MS + 16.0);
+        assert_eq!(g.comparse(), 3, "una sfera che resta visibile non ricompare");
+        // Un colpo con la sfera nuova subito visibile: una comparsa in più al frame dopo.
+        assert_eq!(g.clic(CONTO_MS + 20.0, mira_a(&g, 1)), Esito::Colpo);
+        g.avanza(CONTO_MS + 21.0);
+        assert_eq!(g.comparse(), 4);
+
+        // Con l'attesa della reazione la comparsa arriva quando la sfera si vede, non al colpo.
+        let mut g = Giro::new(OCCHIO, Caso::new(30), regole("riflesso"));
+        g.inizia(-CONTO_MS);
+        g.avanza(0.0);
+        let attesa = g.comparsa(0);
+        assert_eq!(g.comparse(), 0);
+        g.avanza(attesa);
+        assert_eq!(g.comparse(), 1);
+        assert_eq!(g.clic(attesa + 100.0, mira_a(&g, 0)), Esito::Colpo);
+        g.avanza(attesa + 101.0);
+        assert_eq!(g.comparse(), 1, "la sfera nuova aspetta");
+        g.avanza(g.comparsa(0));
+        assert_eq!(g.comparse(), 2);
     }
 
     // ------------------------------------------------------------ tracking

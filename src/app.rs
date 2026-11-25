@@ -137,6 +137,8 @@ pub struct App {
     suoni_banco: bool,
     /// L'ultimo bersaglio colpito: il suo centro all'istante del colpo e quando (ms), per il lampo.
     colpito: Option<(DVec3, f64)>,
+    /// Le comparse del giro già suonate (`Giro::comparse`).
+    comparse_suonate: u32,
     origine: i64,
     clic: [Clic; 256],
     pub pannello_visibile: bool,
@@ -260,6 +262,7 @@ impl App {
             col_banco,
             suoni_banco: false,
             colpito: None,
+            comparse_suonate: 0,
             origine: tempo::qpc(),
             clic: [Clic::default(); 256],
             pannello_visibile: false,
@@ -425,8 +428,8 @@ impl App {
         self.imposta_fattore(fattore);
         self.sensibilita_usata = None;
         self.colpito = None;
+        self.comparse_suonate = 0;
         self.giro.inizia(self.ms(tempo::qpc()));
-        self.suoni.suona(Suono::Comparsa);
         self.registro.inizia(&self.giro, camera::avanti(self.imbardata, self.beccheggio));
         self.latenza.azzera();
         self.prossima_scadenza = 0;
@@ -680,7 +683,6 @@ impl App {
                 match esito {
                     Esito::Colpo => {
                         self.suoni.suona(Suono::Colpo);
-                        self.suoni.suona(Suono::Comparsa);
                         self.colpito = Some((self.giro.colpita(), t));
                     }
                     Esito::Errore => self.suoni.suona(Suono::Errore),
@@ -696,6 +698,12 @@ impl App {
         let d = camera::avanti(self.imbardata, self.beccheggio);
         // Le sfere all'istante della lettura, poi il tracking fino a lì con la visuale appena letta.
         self.giro.avanza(adesso);
+        // Il suono di comparsa quando una sfera si vede davvero: dopo il conto alla rovescia, dopo l'attesa degli
+        // scenari di reazione, o subito dopo un colpo.
+        if self.giro.comparse() != self.comparse_suonate {
+            self.comparse_suonate = self.giro.comparse();
+            self.suoni.suona(Suono::Comparsa);
+        }
         self.giro.traccia(adesso, d);
         self.registro.osserva(&self.giro, d);
         let finito = self.giro.aggiorna(adesso);

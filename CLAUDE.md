@@ -264,7 +264,7 @@ con la virgola, data `GG/MM/AAAA hh:mm:ss`, UTF-8 con il BOM, righe chiuse da CR
 ```
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # 183 test: scenari, giro, tracking, shader, home, sensibilità e variazione, impostazioni, mirino, colori, suoni, menu, visuale, registro, storico, CSV, misure, tempo, aggiornamento
+cargo test                      # 184 test: scenari, giro, tracking, shader, home, sensibilità e variazione, impostazioni, mirino, colori, suoni, menu, visuale, registro, storico, CSV, misure, tempo, aggiornamento
 cargo run --release             # il gioco, a schermo intero (Esc pausa, F3 pannello della latenza)
 cargo run --release -- --finestra            # in una finestra normale
 cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce, scrive misure\bench-<ora>.md
@@ -411,6 +411,11 @@ Allocazioni del codice di aimpro nel frame: 0 prima e dopo, in ogni fase; dentro
 Gli scenari nuovi, a vsync spento: deriva 0,32 / 0,49, filo 0,31 / 0,49, guizzo 0,31 / 0,49, terna 0,32 / 0,50,
 sciame 0,32 / 0,49 (mediana / 99°), circa 3900-4000 frame al secondo, 0 allocazioni di aimpro. I file stanno in
 `verifiche\aimpro-20261121-scenari\banco\` sul PC di Carlo.
+
+Dopo l'unione con aspetto (#14: colori, lampo, suoni), altri quattro banchi alternati la stessa sera: "prima" è
+`main` fd94030, "dopo" il branch unito. Giro di scatto a vsync spento: 0,33 / 0,60 e 0,35 / 0,66 prima, 0,34 / 0,64 e
+0,36 / 0,64 dopo (mediana / 99°); col vsync 3,87-3,88 / 4,38-4,39 in tutti e quattro. Tutte le fasi valide, 0
+allocazioni di aimpro nel frame, anche nella fase coi suoni e negli scenari (0,32-0,33 / 0,51-0,55).
 
 ### Da PresentMon (22/11/2026, PresentMon 2.6.0 insieme a `aimpro --bench --secondi 15`)
 
