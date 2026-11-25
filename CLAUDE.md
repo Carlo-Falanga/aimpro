@@ -15,6 +15,7 @@ Aim trainer nativo per Windows, a bassa latenza, di Carlo. Il contesto del proge
 | glam, bytemuck | 0.34.3, 1.25.2 | vettori e buffer per la GPU |
 | serde, toml | 1.0.229, 1.2.2 | le impostazioni in `%APPDATA%\aimpro\config.toml` e lo storico dei giri |
 | serde_json | 1.0.154 | solo per leggere la risposta delle API di GitHub nel controllo degli aggiornamenti |
+| WASAPI di Windows | crate `windows` 0.62.2 (`Win32_Media_Audio`) | i suoni, da un thread a parte: nessuna libreria audio in più |
 | WinHTTP e CNG di Windows | crate `windows` 0.62.2 | la rete (una GET, nel thread dell'aggiornamento) e lo SHA-256 (`BCryptHash`): niente librerie di rete né di crittografia in più |
 
 Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
@@ -42,8 +43,27 @@ Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
 - `grafica.rs` e `scena.wgsl`: stanza a griglia, sfera disegnata per pixel (raggio contro sfera), mirino e tempo
   come rettangoli istanziati, riscritti solo quando cambiano. I dati del frame (visuale, sfera, schermo: 128 byte)
   vanno nella lista dei comandi come costanti immediate (root constants di DX12), senza `write_buffer`.
-- `giro.rs`, `camera.rs`, `sensibilita.rs`, `config.rs`: lo scenario, la visuale, la conversione delle sensibilità
-  (CS2 0,022 gradi per count, Valorant 0,07; FOV di CS2 orizzontale su 4:3, di Valorant su 16:9) e le impostazioni.
+  Il colore della sfera viene dal suo stato (normale, guardata, colpita) con `colore_bersaglio` nello shader; i
+  colori e il tema della stanza stanno nel buffer delle uniformi, riscritto solo quando cambiano. Un colpo lascia per
+  120 ms un lampo nel colore "colpito" dove era la sfera (una draw in più).
+- `mirino.rs`: il mirino a parametri (croce, punto, cerchio; lunghezza, spessore, spazio, bordo, colore). `pezzi` dà
+  la geometria in pixel una volta sola e la usano sia il giro (rettangoli e anelli istanziati) sia l'anteprima del
+  menu: l'anteprima è uguale al giro pixel per pixel.
+- `aspetto.rs`: i colori dei bersagli e i tre temi della stanza (Grafite, quella di prima; Notte; Sabbia).
+- `suoni.rs`: colpo, errore e comparsa, sintetizzati all'avvio (nessun file, nessun suono di altri), suonati da un
+  thread con WASAPI in modalità condivisa (48 kHz stereo float, convertito da Windows). Il frame incrementa un
+  contatore atomico e, solo se il thread dorme, lo sveglia con `SetEvent`: niente attese né allocazioni. WASAPI si
+  apre alla richiesta sull'uscita predefinita del momento, tiene in coda un periodo del motore audio (di solito
+  10 ms) e dopo 3 secondi di silenzio chiude il flusso, così un'uscita cambiata si prende al suono dopo; se
+  l'uscita si stacca mentre suona, si riapre subito senza perdere i suoni in attesa. Il thread ha priorità alta.
+- `impostazioni.rs`: le parti Mirino, Bersagli e stanza, Suoni del menu (la parte Sensibilità sta in
+  `interfaccia.rs`).
+- `giro.rs`, `camera.rs`, `sensibilita.rs`, `config.rs`: lo scenario, la visuale, la conversione delle sensibilità e
+  le impostazioni. Gradi per count a sensibilità 1: CS2 e Apex Legends 0,022, Valorant 0,07, Overwatch 2 e Destiny 2
+  0,0066, Marathon 0,0033; oppure i cm/360 scritti direttamente. FOV: CS2 e Apex
+  (dal valore del menu con `cl_fovScale`) su 4:3, Marathon col suo moltiplicatore (valore × 0,96 = gradi orizzontali su 16:9), gli altri orizzontali su 16:9. Fonti e date nel commento in cima a
+  `sensibilita.rs`. Sensibilità verticale con un moltiplicatore (`camera::ruota`); sensibilità a caso entro ±N%, a
+  ogni giro o ogni N secondi di gioco, col valore usato nel riepilogo (il banco non la usa).
   Gli scenari durano 30 secondi (lo standard scelto da Carlo il 22/11/2026). Record e statistiche sono per id di
   scenario: uno scenario con un'altra durata ha un altro id.
 - `registro.rs`: per ogni bersaglio colpito il tempo comparsa→colpo (pause tolte), la distanza angolare dal
@@ -118,7 +138,7 @@ tempo_medio_ms = 338.28         # manca se non ci sono colpi
 overshoot = 89                  # tutti, anche sul bersaglio rimasto in campo alla fine
 
 [impostazioni]                  # quelle con cui si è giocato il giro
-gioco = "cs2"                   # "cs2" o "valorant"
+gioco = "cs2"                   # cs2, valorant, apex, overwatch2, destiny2, marathon, cm360
 sensibilita = 1.25
 cm_360 = 41.56
 fov = 90.0
@@ -150,14 +170,19 @@ con la virgola, data `GG/MM/AAAA hh:mm:ss`, UTF-8 con il BOM, righe chiuse da CR
 ```
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # 90 test: sensibilità, impostazioni, menu, visuale, giro, registro, storico, CSV, misure, tempo, aggiornamento
+cargo test                      # 130 test: sensibilità e variazione, impostazioni, mirino, colori, suoni, menu, visuale, giro, registro, storico, CSV, misure, tempo, aggiornamento
 cargo run --release             # il gioco, a schermo intero (Esc pausa, F3 pannello della latenza)
 cargo run --release -- --finestra            # in una finestra normale
 cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce, scrive misure\bench-<ora>.md
 ```
 
 Il banco prende lo schermo intero per circa due minuti e simula il mouse con `SendInput` solo quando aimpro è in
-primo piano. Ogni fase di giro riparte da capo se la finestra perde il primo piano. Accanto al file dei risultati
+primo piano. Ogni fase di giro riparte da capo se la finestra perde il primo piano. La fase "giro, vsync spento,
+suoni accesi" tiene accesi i suoni (ogni clic simulato, uno ogni 250 ms, ne fa partire uno) e controlla che siano
+partiti; le altre fasi li tengono spenti, come la sensibilità a caso. Banco del 25/11/2026, stesso PC, prima e
+dopo la task dell'aspetto (`verifiche\aimpro-20261122-aspetto\banco\prima-2.md` e `dopo-2.md`): count→present
+vecchio nel giro a vsync spento 0,33 / 0,65 ms prima e 0,33 / 0,60 dopo (mediana / 99°), coi suoni accesi
+0,31 / 0,50; 0 allocazioni di aimpro nel frame in tutte le fasi. Accanto al file dei risultati
 scrive `*.fasi.csv` con gli istanti QPC di ogni fase, per tagliare il CSV di PresentMon sulle stesse fasi.
 
 Per provare storico e statistiche senza toccare quelli veri si avvia aimpro con `APPDATA` puntato a una cartella di

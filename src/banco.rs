@@ -38,6 +38,8 @@ enum Tipo {
         vsync: bool,
         limite_per_hz: f64,
         pannello: bool,
+        /// I suoni accesi: ogni clic simulato fa partire il suono di errore (o colpo e comparsa).
+        suoni: bool,
     },
     Riepilogo,
     Pausa,
@@ -62,6 +64,8 @@ struct Partenza {
     eventi: u64,
     simulati: u64,
     iniettati: u64,
+    suoni_richiesti: u32,
+    suoni_partiti: u32,
 }
 
 pub struct Banco {
@@ -117,34 +121,39 @@ impl Banco {
         let fasi = vec![
             Fase {
                 nome: "riscaldamento",
-                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false },
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false, suoni: false },
                 secondi: 3.0,
             },
             Fase { nome: "menu fermo", tipo: Tipo::Menu, secondi: 8.0 },
             Fase { nome: "menu, mouse in movimento", tipo: Tipo::MenuMouse, secondi: 5.0 },
             Fase {
                 nome: "giro, vsync spento",
-                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false },
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false, suoni: false },
                 secondi: g,
             },
             Fase {
                 nome: "giro, vsync acceso",
-                tipo: Tipo::Giro { vsync: true, limite_per_hz: 0.0, pannello: false },
+                tipo: Tipo::Giro { vsync: true, limite_per_hz: 0.0, pannello: false, suoni: false },
                 secondi: g,
             },
             Fase {
                 nome: "giro, vsync spento, limite = Hz schermo",
-                tipo: Tipo::Giro { vsync: false, limite_per_hz: 1.0, pannello: false },
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 1.0, pannello: false, suoni: false },
                 secondi: g,
             },
             Fase {
                 nome: "giro, vsync spento, limite = 2 x Hz schermo",
-                tipo: Tipo::Giro { vsync: false, limite_per_hz: 2.0, pannello: false },
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 2.0, pannello: false, suoni: false },
                 secondi: g,
             },
             Fase {
                 nome: "giro, vsync spento, pannello F3 aperto",
-                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: true },
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: true, suoni: false },
+                secondi: g,
+            },
+            Fase {
+                nome: "giro, vsync spento, suoni accesi",
+                tipo: Tipo::Giro { vsync: false, limite_per_hz: 0.0, pannello: false, suoni: true },
                 secondi: g,
             },
             Fase { nome: "riepilogo fermo", tipo: Tipo::Riepilogo, secondi: 5.0 },
@@ -271,6 +280,7 @@ impl Banco {
         if !matches!(f.tipo, Tipo::Giro { .. }) {
             app.mostra_pannello(false);
         }
+        app.imposta_suoni_banco(matches!(f.tipo, Tipo::Giro { suoni: true, .. }));
         match f.tipo {
             Tipo::Menu | Tipo::MenuMouse => {
                 if let Some(w) = &app.finestra {
@@ -284,7 +294,7 @@ impl Banco {
                     self.inietta.store(true, Ordering::Release);
                 }
             }
-            Tipo::Giro { vsync, limite_per_hz, pannello } => {
+            Tipo::Giro { vsync, limite_per_hz, pannello, .. } => {
                 app.mostra_pannello(pannello);
                 let limite = (app.hz_schermo * limite_per_hz).round() as u32;
                 app.imposta_vsync_e_limite(vsync, limite);
@@ -321,6 +331,8 @@ impl Banco {
             eventi: app.ingresso.eventi.load(Ordering::Relaxed),
             simulati: app.ingresso.simulati.load(Ordering::Relaxed),
             iniettati: self.iniettati.load(Ordering::Relaxed),
+            suoni_richiesti: app.suoni_richiesti(),
+            suoni_partiti: app.suoni_partiti(),
         });
     }
 
@@ -427,8 +439,19 @@ impl Banco {
             }
         };
         match f.tipo {
-            Tipo::Giro { vsync, limite_per_hz, pannello } => {
-                if app.stato != Stato::Giro {
+            Tipo::Giro { vsync, limite_per_hz, pannello, suoni } => {
+                let richiesti = app.suoni_richiesti().wrapping_sub(p.suoni_richiesti);
+                let partiti = app.suoni_partiti().wrapping_sub(p.suoni_partiti);
+                // Con i suoni: un clic ogni 250 ms, quindi almeno un suono al secondo, e il thread audio partito.
+                let suoni_ok =
+                    !suoni || (f64::from(richiesti) >= durata_ms / 1000.0 && app.suoni_partiti() > 0);
+                if !suoni && richiesti > 0 {
+                    Some(format!("{richiesti} suoni chiesti in una fase senza suoni"))
+                } else if !suoni_ok {
+                    Some(format!(
+                        "suoni: {richiesti} chiesti, flusso audio partito {partiti} volte nella fase"
+                    ))
+                } else if app.stato != Stato::Giro {
                     Some(format!("a fine fase lo stato era {:?}, non il giro", app.stato))
                 } else if !sistema::in_primo_piano(hwnd) {
                     Some("a fine fase la finestra non era in primo piano".into())

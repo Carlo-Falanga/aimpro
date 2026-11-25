@@ -33,10 +33,12 @@ use crate::ingresso::{Clic, Ingresso};
 use crate::interfaccia::{self, Azione, InfoMenu};
 use crate::latenza::{CAMPIONI_PANNELLO, Latenza, testo_pannello};
 use crate::registro::Registro;
-use crate::sensibilita::{fov_verticale, radianti_per_count};
+use crate::sensibilita::{Casuale, Variazione, fov_verticale, radianti_per_count, testo_variazione};
 use crate::sistema;
 use crate::storico::{self, Confronto, GiroSalvato, Ora, Storico};
+use crate::suoni::{Suoni, Suono};
 use crate::tempo;
+use crate::{aspetto, camera::colpisce_sfera};
 use crate::{esporta, giro};
 
 const OCCHIO: DVec3 = DVec3::new(0.0, 1.7, 0.0);
@@ -92,8 +94,25 @@ pub struct App {
     imbardata: f64,
     beccheggio: f64,
     applicati: (i64, i64),
+    /// Radianti per count della sensibilità scelta, senza la variazione a caso.
     rad_per_count: f64,
+    /// Quelli in uso nel giro: orizzontale e verticale (col moltiplicatore e la variazione a caso).
+    rad_x: f64,
+    rad_y: f64,
     fov_y: f64,
+    /// La sensibilità a caso del giro in corso.
+    casuale: Casuale,
+    /// La riga del riepilogo con la sensibilità usata nell'ultimo giro.
+    sensibilita_usata: Option<String>,
+    /// Il thread dei suoni; il frame gli lascia solo un contatore.
+    suoni: Arc<Suoni>,
+    /// Gira il banco. Si guarda questo e non `self.banco`, che mentre il banco fa un passo è fuori dall'app
+    /// (`take`): da lì il banco chiama `inizia_giro`, `termina_giro` e `imposta_suoni_banco`.
+    col_banco: bool,
+    /// Col banco, se i suoni sono accesi lo decide lui (`imposta_suoni_banco`).
+    suoni_banco: bool,
+    /// L'ultimo bersaglio colpito: dove era, il raggio e quando (ms), per il lampo.
+    colpito: Option<(DVec3, f64, f64)>,
     origine: i64,
     clic: [Clic; 256],
     pub pannello_visibile: bool,
@@ -148,6 +167,7 @@ fn modo_migliore(monitor: &MonitorHandle) -> Option<VideoModeHandle> {
 
 impl App {
     pub fn new(banco: Option<Banco>, proxy: EventLoopProxy<()>) -> Self {
+        let col_banco = banco.is_some();
         let percorso_config = config::percorso_predefinito();
         let (config, avviso) = config::carica(&percorso_config);
         // Il banco non va in rete: niente che si mescoli alle sue misure. Il thread sveglia il menu con un evento.
@@ -161,6 +181,8 @@ impl App {
         interfaccia::stile(&egui_ctx);
         // La sessione parte adesso, anche se i file dello storico finiscono di leggersi dopo.
         let avvio = storico::istante_ms();
+        // Il banco li accende solo nella sua fase coi suoni.
+        let suoni = Suoni::avvia(banco.is_none() && config.suoni, config.volume);
         let mut app = App {
             config,
             percorso_config,
@@ -187,7 +209,15 @@ impl App {
             beccheggio: 0.0,
             applicati: (0, 0),
             rad_per_count: 0.0,
+            rad_x: 0.0,
+            rad_y: 0.0,
             fov_y: 1.0,
+            casuale: Casuale::new(tempo::qpc() as u64 ^ 0x9E37_79B9_7F4A_7C15),
+            sensibilita_usata: None,
+            suoni,
+            col_banco,
+            suoni_banco: false,
+            colpito: None,
             origine: tempo::qpc(),
             clic: [Clic::default(); 256],
             pannello_visibile: false,
@@ -212,17 +242,49 @@ impl App {
     }
 
     fn applica_config(&mut self) {
-        self.rad_per_count = radianti_per_count(self.config.gioco, self.config.sensibilita);
+        self.rad_per_count = radianti_per_count(self.config.gioco, self.config.sensibilita, self.config.dpi);
+        self.imposta_fattore(self.casuale.fattore);
         self.fov_y = fov_verticale(self.config.gioco, self.config.fov);
         if let Some(g) = self.grafica.as_mut() {
             g.imposta_vsync(self.config.vsync);
+            g.imposta_aspetto(self.config.mirino, self.config.bersagli, self.config.tema);
+        }
+        if self.col_banco {
+            self.suoni.imposta(self.suoni_banco, 50.0);
+        } else {
+            self.suoni.imposta(self.config.suoni, self.config.volume);
         }
         self.prossima_scadenza = 0;
     }
 
+    /// La sensibilità in uso: quella scelta per il fattore a caso, e in verticale per il moltiplicatore.
+    fn imposta_fattore(&mut self, fattore: f64) {
+        self.rad_x = self.rad_per_count * fattore;
+        self.rad_y = self.rad_x * self.config.moltiplicatore_y;
+    }
+
+    /// La variazione a caso: il banco non la usa (misura sempre la stessa visuale).
+    fn variazione(&self) -> Variazione {
+        if self.col_banco { Variazione::default() } else { self.config.variazione }
+    }
+
+    /// Il banco accende i suoni solo nella sua fase coi suoni.
+    pub fn imposta_suoni_banco(&mut self, accesi: bool) {
+        self.suoni_banco = accesi;
+        self.applica_config();
+    }
+
+    pub fn suoni_richiesti(&self) -> u32 {
+        self.suoni.richieste_totali()
+    }
+
+    pub fn suoni_partiti(&self) -> u32 {
+        self.suoni.suonati.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     fn salva_config(&mut self) {
         self.da_salvare = false;
-        if self.banco.is_some() {
+        if self.col_banco {
             return; // il banco cambia vsync e limite solo per sé
         }
         match config::salva(&self.percorso_config, &self.config) {
@@ -291,7 +353,13 @@ impl App {
         self.scarta_clic();
         self.imbardata = 0.0;
         self.beccheggio = 0.0;
+        let v = self.variazione();
+        let fattore = self.casuale.inizia(&v);
+        self.imposta_fattore(fattore);
+        self.sensibilita_usata = None;
+        self.colpito = None;
         self.giro.inizia(self.ms(tempo::qpc()));
+        self.suoni.suona(Suono::Comparsa);
         self.registro.inizia(&self.giro, camera::avanti(self.imbardata, self.beccheggio));
         self.latenza.azzera();
         self.prossima_scadenza = 0;
@@ -350,6 +418,7 @@ impl App {
     fn fine_giro(&mut self) {
         self.ingresso.imposta_attivo(false);
         let r = self.giro.riepilogo();
+        self.sensibilita_usata = testo_variazione(&self.casuale, self.config.gioco, self.config.sensibilita);
         self.salva_giro(&r);
         self.stato = Stato::Riepilogo(r);
         self.cursore_di_gioco(false);
@@ -361,7 +430,7 @@ impl App {
     fn salva_giro(&mut self, r: &Riepilogo) {
         self.confronto = None;
         self.avviso_storico = None;
-        if self.banco.is_some() {
+        if self.col_banco {
             return;
         }
         let ora = Ora::adesso();
@@ -404,8 +473,8 @@ impl App {
     #[inline]
     fn applica(&mut self, dx: i64, dy: i64) {
         let (ddx, ddy) = (dx - self.applicati.0, dy - self.applicati.1);
-        self.imbardata += ddx as f64 * self.rad_per_count;
-        self.beccheggio = camera::limita_beccheggio(self.beccheggio - ddy as f64 * self.rad_per_count);
+        (self.imbardata, self.beccheggio) =
+            camera::ruota(self.imbardata, self.beccheggio, ddx, ddy, self.rad_x, self.rad_y);
         self.applicati = (dx, dy);
     }
 
@@ -414,12 +483,19 @@ impl App {
         let avanti = camera::avanti(self.imbardata, self.beccheggio);
         let destra = camera::destra(self.imbardata);
         let restante = self.giro.restante_ms(tempo_ms);
+        let guardato = nel_giro && colpisce_sfera(OCCHIO, avanti, self.giro.bersaglio, self.giro.raggio());
+        let lampo = self
+            .colpito
+            .filter(|_| nel_giro)
+            .and_then(|(c, r, t)| aspetto::lampo(tempo_ms - t).map(|a| (c, r, a)));
         Scena {
             vp: camera::vista_proiezione(OCCHIO, self.imbardata, self.beccheggio, self.fov_y, proporzione),
             occhio: OCCHIO,
             destra,
             su: destra.cross(avanti),
             sfera: nel_giro.then(|| (self.giro.bersaglio, self.giro.raggio())),
+            stato_sfera: aspetto::stato(guardato).valore(),
+            lampo,
             tempo: nel_giro.then(|| {
                 ((restante / 1000.0).ceil() as u32, (restante / crate::giro::DURATA_GIRO_MS) as f32)
             }),
@@ -451,13 +527,32 @@ impl App {
         let n = self.ingresso.prendi_clic(&mut self.clic);
         let lettura = self.ingresso.leggi();
         let letto = tempo::qpc();
+        // La sensibilità a caso "ogni N secondi" cambia sui secondi di gioco (la pausa non conta).
+        if self.casuale.attiva() {
+            let v = self.config.variazione;
+            let giocati = (giro::DURATA_GIRO_MS - self.giro.restante_ms(self.ms(letto))) / 1000.0;
+            if let Some(f) = self.casuale.aggiorna(&v, giocati, giro::DURATA_GIRO_MS / 1000.0) {
+                self.imposta_fattore(f);
+            }
+        }
         let mut primo_clic = 0;
         for i in 0..n {
             let c = self.clic[i];
             self.applica(c.dx, c.dy);
             let d = camera::avanti(self.imbardata, self.beccheggio);
-            let esito = self.giro.clic(self.ms(c.qpc), d);
+            let (prima, t) = (self.giro.bersaglio, self.ms(c.qpc));
+            let esito = self.giro.clic(t, d);
             self.registro.clic(&self.giro, esito, d);
+            // I suoni: un contatore atomico per il thread audio, niente attese.
+            match esito {
+                Esito::Colpo => {
+                    self.suoni.suona(Suono::Colpo);
+                    self.suoni.suona(Suono::Comparsa);
+                    self.colpito = Some((prima, self.giro.raggio(), t));
+                }
+                Esito::Errore => self.suoni.suona(Suono::Errore),
+                Esito::Ignorato => {}
+            }
             if primo_clic == 0 && esito != Esito::Ignorato {
                 primo_clic = c.qpc;
             }
@@ -557,6 +652,7 @@ impl App {
         let avviso = self.avviso.clone();
         let (confronto, avviso_storico, esportato) =
             (self.confronto, self.avviso_storico.clone(), self.esportato.clone());
+        let sensibilita_usata = self.sensibilita_usata.clone();
         if stato_ora == Stato::Statistiche {
             self.storico();
         }
@@ -587,12 +683,17 @@ impl App {
                         build: self.aggiornamento.attuale(),
                         aggiornamento: &stato_aggiornamento,
                         hz_schermo: interfaccia::hz_intero(self.hz_schermo),
+                        audio_guasto: self.suoni.guasto.load(std::sync::atomic::Ordering::Acquire),
                     },
                 ),
                 Stato::Pausa => interfaccia::pausa(ui, restanti),
-                Stato::Riepilogo(r) => {
-                    interfaccia::riepilogo(ui, &r, confronto.as_ref(), avviso_storico.as_deref())
-                }
+                Stato::Riepilogo(r) => interfaccia::riepilogo(
+                    ui,
+                    &r,
+                    confronto.as_ref(),
+                    avviso_storico.as_deref(),
+                    sensibilita_usata.as_deref(),
+                ),
                 Stato::Statistiche => storico
                     .map_or(Azione::TornaAlMenu, |s| interfaccia::statistiche(ui, s, esportato.as_deref())),
                 Stato::Giro => Azione::Nessuna,
@@ -665,6 +766,11 @@ impl App {
                 self.torna_al_menu();
                 self.esportato = None;
                 self.stato = Stato::Statistiche;
+            }
+            Azione::ProvaSuono => {
+                // Anche a fine trascinamento del volume: il valore nuovo si applica e si salva.
+                self.esegui(Azione::Impostazioni);
+                self.suoni.suona(Suono::Colpo);
             }
             Azione::EsportaCsv => {
                 self.esporta_csv();
@@ -753,7 +859,11 @@ impl ApplicationHandler for App {
             }
         };
         match Grafica::new(finestra.clone(), self.config.vsync) {
-            Ok(g) => self.grafica = Some(g),
+            Ok(g) => {
+                self.grafica = Some(g);
+                // Mirino, colori e tema vanno alla grafica appena c'è.
+                self.applica_config();
+            }
             Err(e) => {
                 sistema::errore_fatale(&format!("la grafica non parte: {e}"), self.banco.is_some());
                 el.exit();
