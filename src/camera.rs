@@ -12,6 +12,13 @@ pub fn limita_beccheggio(p: f64) -> f64 {
     p.clamp(-BECCHEGGIO_MAX, BECCHEGGIO_MAX)
 }
 
+/// La visuale dopo `dx`, `dy` count del mouse: `rad_x` radianti per count in orizzontale, `rad_y` in verticale
+/// (la sensibilità per il moltiplicatore verticale). Il mouse in avanti (dy negativo) guarda in alto.
+#[inline]
+pub fn ruota(imbardata: f64, beccheggio: f64, dx: i64, dy: i64, rad_x: f64, rad_y: f64) -> (f64, f64) {
+    (imbardata + dx as f64 * rad_x, limita_beccheggio(beccheggio - dy as f64 * rad_y))
+}
+
 /// Il versore dello sguardo.
 pub fn avanti(imbardata: f64, beccheggio: f64) -> DVec3 {
     let cp = beccheggio.cos();
@@ -123,6 +130,25 @@ mod test {
         vicino(limita_beccheggio(2.0), 89f64.to_radians());
         vicino(limita_beccheggio(-2.0), -(89f64.to_radians()));
         vicino(limita_beccheggio(0.1), 0.1);
+    }
+
+    #[test]
+    fn il_moltiplicatore_verticale_cambia_solo_il_beccheggio() {
+        let r = 0.022f64.to_radians();
+        // Stessi count in orizzontale e in verticale, verticale a metà: il beccheggio gira la metà.
+        let (y, p) = ruota(0.0, 0.0, 100, -100, r, r * 0.5);
+        vicino(y, 100.0 * r);
+        vicino(p, 50.0 * r);
+        // Moltiplicatore 1: la stessa rotazione nei due assi.
+        let (y, p) = ruota(0.0, 0.0, 100, -100, r, r);
+        vicino(y, p);
+        // Moltiplicatore 2: il doppio in verticale, l'orizzontale non cambia.
+        let (y2, p2) = ruota(0.0, 0.0, 100, -100, r, r * 2.0);
+        vicino(y2, y);
+        vicino(p2, 2.0 * p);
+        // Il limite a 89 gradi vale anche col moltiplicatore.
+        let (_, p) = ruota(0.0, 0.0, 0, -1_000_000, r, r * 3.0);
+        vicino(p, 89f64.to_radians());
     }
 
     #[test]

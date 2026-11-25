@@ -5,9 +5,12 @@
 use egui::{Align2, Color32, CornerRadius, FontId, Frame, Margin, Pos2, RichText, Sense, Shape, Stroke, Ui};
 
 use crate::aggiornamento::Stato as StatoAggiornamento;
-use crate::config::{Config, LIMITI_DPI, LIMITI_FOV, LIMITI_FPS, LIMITI_SENSIBILITA};
+use crate::config::{Config, LIMITI_DPI, LIMITI_FOV, LIMITI_FPS, LIMITI_MOLTIPLICATORE_Y};
 use crate::giro::Riepilogo;
-use crate::sensibilita::{Gioco, cm_per_360, converti, gradi_per_count};
+use crate::sensibilita::{
+    Gioco, LIMITI_SECONDI_VARIAZIONE, LIMITI_VARIAZIONE, Ogni, Variazione, cm_per_360, converti,
+    gradi_per_count,
+};
 use crate::storico::{Confronto, GiroSalvato, SCATTO, Storico};
 
 pub const ACCENTO: Color32 = Color32::from_rgb(255, 176, 33);
@@ -27,7 +30,71 @@ pub enum Azione {
     Aggiorna,
     /// Le impostazioni sono cambiate: si salvano e si applicano.
     Impostazioni,
+    /// "Senti": il suono del colpo, col volume scelto.
+    ProvaSuono,
     Chiudi,
+}
+
+/// Le parti del menu delle impostazioni.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Sezione {
+    #[default]
+    Gioco,
+    Mirino,
+    Aspetto,
+    Suoni,
+}
+
+impl Sezione {
+    pub const TUTTE: [Sezione; 4] = [Sezione::Gioco, Sezione::Mirino, Sezione::Aspetto, Sezione::Suoni];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Sezione::Gioco => "Sensibilità",
+            Sezione::Mirino => "Mirino",
+            Sezione::Aspetto => "Bersagli e stanza",
+            Sezione::Suoni => "Suoni",
+        }
+    }
+}
+
+/// La sensibilità a caso: acceso, ±N%, a ogni giro o ogni N secondi. Vero se è cambiata.
+fn riga_variazione(ui: &mut Ui, v: &mut Variazione) -> bool {
+    let prima = *v;
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut v.attiva, "entro ±");
+            ui.add_enabled(
+                v.attiva,
+                egui::DragValue::new(&mut v.percento)
+                    .range(LIMITI_VARIAZIONE.0..=LIMITI_VARIAZIONE.1)
+                    .speed(0.2)
+                    .max_decimals(1)
+                    .suffix("%"),
+            );
+        });
+        if v.attiva {
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("variazione ogni")
+                    .selected_text(if v.ogni == Ogni::Giro { "a ogni giro" } else { "ogni" })
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut v.ogni, Ogni::Giro, "a ogni giro");
+                        ui.selectable_value(&mut v.ogni, Ogni::Secondi, "ogni");
+                    });
+                if v.ogni == Ogni::Secondi {
+                    ui.add(
+                        egui::DragValue::new(&mut v.secondi)
+                            .range(LIMITI_SECONDI_VARIAZIONE.0..=LIMITI_SECONDI_VARIAZIONE.1)
+                            .speed(0.1)
+                            .max_decimals(1)
+                            .suffix(" s"),
+                    );
+                }
+            });
+        }
+    });
+    *v != prima
 }
 
 /// Informazioni da mostrare nel menu.
@@ -40,6 +107,8 @@ pub struct InfoMenu<'a> {
     pub aggiornamento: &'a StatoAggiornamento,
     /// Gli Hz dello schermo, arrotondati (0 se Windows non li dice): la voce del limite pari a questi dice "(schermo)".
     pub hz_schermo: u32,
+    /// L'uscita audio non si è aperta (o si è persa): i suoni sono muti.
+    pub audio_guasto: bool,
 }
 
 /// Le voci fisse della tendina del limite di fps, fra "Senza limite" e "Personalizzato…".
@@ -287,116 +356,173 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
         let si_gioca =
             !matches!(info.aggiornamento, StatoAggiornamento::Scarico { .. } | StatoAggiornamento::Pronto(_));
 
-        egui::Grid::new("impostazioni").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-            ui.label("Sensibilità di");
-            let prima = c.gioco;
-            egui::ComboBox::from_id_salt("gioco").selected_text(c.gioco.nome()).show_ui(ui, |ui| {
-                for g in Gioco::TUTTI {
-                    ui.selectable_value(&mut c.gioco, g, g.nome());
-                }
-            });
-            if c.gioco != prima {
-                // Stessi centimetri per giro nel gioco nuovo; FOV al valore di base del gioco.
-                // Dentro i limiti: un valore estremo convertito si ferma al limite invece di tornare al predefinito.
-                c.sensibilita = ((converti(prima, c.sensibilita, c.gioco) * 1_000_000.0).round()
-                    / 1_000_000.0)
-                    .clamp(LIMITI_SENSIBILITA.0, LIMITI_SENSIBILITA.1);
-                c.fov = c.gioco.fov_predefinito();
-                azione = Azione::Impostazioni;
+        let id_sezione = egui::Id::unique("sezione del menu");
+        let mut sezione = ui.data(|d| d.get_temp::<Sezione>(id_sezione)).unwrap_or_default();
+        ui.horizontal(|ui| {
+            for s in Sezione::TUTTE {
+                ui.selectable_value(&mut sezione, s, RichText::new(s.nome()).size(15.0));
             }
-            ui.end_row();
-
-            ui.label("Sensibilità");
-            if ui
-                .add(
-                    egui::DragValue::new(&mut c.sensibilita)
-                        .range(LIMITI_SENSIBILITA.0..=LIMITI_SENSIBILITA.1)
-                        .speed(0.005)
-                        .max_decimals(4),
-                )
-                .changed()
-            {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
-
-            ui.label(if c.gioco == Gioco::Cs2 {
-                "FOV (su 4:3, 90 in CS2)"
-            } else {
-                "FOV (su 16:9, 103 in Valorant)"
-            });
-            if ui
-                .add(
-                    egui::DragValue::new(&mut c.fov)
-                        .range(LIMITI_FOV.0..=LIMITI_FOV.1)
-                        .speed(0.1)
-                        .max_decimals(2),
-                )
-                .changed()
-            {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
-
-            ui.label("DPI del mouse");
-            if ui
-                .add(egui::DragValue::new(&mut c.dpi).range(LIMITI_DPI.0..=LIMITI_DPI.1).speed(10.0))
-                .changed()
-            {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
-
-            ui.label("Vsync");
-            if ui.checkbox(&mut c.vsync, "acceso (più latenza, niente tearing)").changed() {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
-
-            if c.vsync {
-                // Col vsync il limite non vale: la riga resta, grigia, e dice perché.
-                // Disegnate come disattivate, cioè più scure delle altre righe.
-                ui.add_enabled(false, egui::Label::new("Limite fps"));
-                // Alta quanto la tendina: accendendo il vsync il riquadro non si sposta.
-                let alta =
-                    ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
-                ui.allocate_ui_with_layout(
-                    egui::vec2(0.0, alta),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| ui.add_enabled(false, egui::Label::new("col vsync decide lo schermo")),
-                );
-            } else {
-                ui.label("Limite fps");
-                if riga_limite(ui, c, info.hz_schermo) {
+        });
+        ui.data_mut(|d| d.insert_temp(id_sezione, sezione));
+        ui.add_space(2.0);
+        match sezione {
+            Sezione::Gioco => {}
+            Sezione::Mirino => {
+                if crate::impostazioni::mirino(ui, c) {
                     azione = Azione::Impostazioni;
                 }
             }
-            ui.end_row();
-
-            ui.label("Schermo intero");
-            if ui.checkbox(&mut c.schermo_intero_esclusivo, "esclusivo (vale dal prossimo avvio)").changed() {
-                azione = Azione::Impostazioni;
+            Sezione::Aspetto => {
+                if crate::impostazioni::aspetto(ui, c) {
+                    azione = Azione::Impostazioni;
+                }
             }
-            ui.end_row();
+            Sezione::Suoni => match crate::impostazioni::suoni(ui, c, info.audio_guasto) {
+                Some(true) => azione = Azione::ProvaSuono,
+                Some(false) => azione = Azione::Impostazioni,
+                None => {}
+            },
+        }
 
-            ui.label("Aggiornamenti");
-            if ui.checkbox(&mut c.controlla_aggiornamenti, "controlla all'avvio").changed() {
-                azione = Azione::Impostazioni;
-            }
-            ui.end_row();
-        });
+        if sezione == Sezione::Gioco {
+            egui::Grid::new("impostazioni").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                ui.label("Sensibilità di");
+                let prima = c.gioco;
+                egui::ComboBox::from_id_salt("gioco").selected_text(c.gioco.nome()).height(400.0).show_ui(
+                    ui,
+                    |ui| {
+                        for g in Gioco::TUTTI {
+                            ui.selectable_value(&mut c.gioco, g, g.nome());
+                        }
+                    },
+                );
+                if c.gioco != prima {
+                    // Stessi centimetri per giro nel gioco nuovo; FOV al valore di base del gioco.
+                    // Dentro i limiti: un valore estremo convertito si ferma al limite invece di tornare al predefinito.
+                    let (min, max) = c.gioco.limiti_sensibilita();
+                    c.sensibilita = ((converti(prima, c.sensibilita, c.gioco, c.dpi) * 1_000_000.0).round()
+                        / 1_000_000.0)
+                        .clamp(min, max);
+                    c.fov = c.gioco.fov_predefinito();
+                    azione = Azione::Impostazioni;
+                }
+                ui.end_row();
 
-        ui.add_space(2.0);
-        ui.label(
+                ui.label(c.gioco.nome_sensibilita());
+                let (min, max) = c.gioco.limiti_sensibilita();
+                let (passo, decimali) = if c.gioco == Gioco::Cm360 { (0.1, 2) } else { (0.005, 4) };
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut c.sensibilita)
+                            .range(min..=max)
+                            .speed(passo)
+                            .max_decimals(decimali),
+                    )
+                    .changed()
+                {
+                    azione = Azione::Impostazioni;
+                }
+                ui.end_row();
+
+                ui.label("Verticale");
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut c.moltiplicatore_y)
+                            .range(LIMITI_MOLTIPLICATORE_Y.0..=LIMITI_MOLTIPLICATORE_Y.1)
+                            .speed(0.01)
+                            .max_decimals(2)
+                            .prefix("× "),
+                    )
+                    .on_hover_text("La sensibilità in verticale rispetto a quella orizzontale: 1 = uguale.")
+                    .changed()
+                {
+                    azione = Azione::Impostazioni;
+                }
+                ui.end_row();
+
+                ui.label("Sensibilità a caso");
+                if riga_variazione(ui, &mut c.variazione) {
+                    azione = Azione::Impostazioni;
+                }
+                ui.end_row();
+
+                ui.label(c.gioco.descrizione_fov());
+                if ui
+                    .add(
+                        egui::DragValue::new(&mut c.fov)
+                            .range(LIMITI_FOV.0..=LIMITI_FOV.1)
+                            .speed(0.1)
+                            .max_decimals(2),
+                    )
+                    .changed()
+                {
+                    azione = Azione::Impostazioni;
+                }
+                ui.end_row();
+
+                ui.label("DPI del mouse");
+                if ui
+                    .add(egui::DragValue::new(&mut c.dpi).range(LIMITI_DPI.0..=LIMITI_DPI.1).speed(10.0))
+                    .changed()
+                {
+                    azione = Azione::Impostazioni;
+                }
+                ui.end_row();
+
+                ui.label("Vsync");
+                if ui.checkbox(&mut c.vsync, "acceso (più latenza, niente tearing)").changed() {
+                    azione = Azione::Impostazioni;
+                }
+                ui.end_row();
+
+                if c.vsync {
+                    // Col vsync il limite non vale: la riga resta, grigia, e dice perché.
+                    // Disegnate come disattivate, cioè più scure delle altre righe.
+                    ui.add_enabled(false, egui::Label::new("Limite fps"));
+                    // Alta quanto la tendina: accendendo il vsync il riquadro non si sposta.
+                    let alta =
+                        ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(0.0, alta),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| ui.add_enabled(false, egui::Label::new("col vsync decide lo schermo")),
+                    );
+                } else {
+                    ui.label("Limite fps");
+                    if riga_limite(ui, c, info.hz_schermo) {
+                        azione = Azione::Impostazioni;
+                    }
+                }
+                ui.end_row();
+
+                ui.label("Schermo intero");
+                if ui
+                    .checkbox(&mut c.schermo_intero_esclusivo, "esclusivo (vale dal prossimo avvio)")
+                    .changed()
+                {
+                    azione = Azione::Impostazioni;
+                }
+                ui.end_row();
+
+                ui.label("Aggiornamenti");
+                if ui.checkbox(&mut c.controlla_aggiornamenti, "controlla all'avvio").changed() {
+                    azione = Azione::Impostazioni;
+                }
+                ui.end_row();
+            });
+
+            ui.add_space(2.0);
+            ui.label(
             RichText::new(format!(
                 "Ogni count del mouse gira la visuale di {:.4} gradi: a {:.0} DPI un giro completo è {:.1} cm.",
-                gradi_per_count(c.gioco, c.sensibilita),
+                gradi_per_count(c.gioco, c.sensibilita, c.dpi),
                 c.dpi,
                 cm_per_360(c.gioco, c.sensibilita, c.dpi)
             ))
             .color(TENUE)
             .size(13.0),
         );
+        }
         if let Some(a) = info.avviso {
             ui.label(RichText::new(a).color(AVVISO).size(13.0));
         }
@@ -463,7 +589,13 @@ pub fn testo_confronto(c: &Confronto) -> (String, String, bool) {
     (record, differenza, c.nuovo_record())
 }
 
-pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, confronto: Option<&Confronto>, avviso: Option<&str>) -> Azione {
+pub fn riepilogo(
+    ui: &mut Ui,
+    r: &Riepilogo,
+    confronto: Option<&Confronto>,
+    avviso: Option<&str>,
+    sensibilita_usata: Option<&str>,
+) -> Azione {
     scheda(ui, "riepilogo", |ui| {
         let mut azione = Azione::Nessuna;
         ui.label(RichText::new("Fine del giro").size(22.0).strong());
@@ -493,6 +625,11 @@ pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, confronto: Option<&Confronto>, avvi
                 ui.end_row();
                 ui.label("Rispetto al record");
                 ui.label(RichText::new(differenza).strong().size(16.0));
+                ui.end_row();
+            }
+            if let Some(s) = sensibilita_usata {
+                ui.label("Sensibilità usata");
+                ui.label(RichText::new(s).strong().size(16.0));
                 ui.end_row();
             }
         });
