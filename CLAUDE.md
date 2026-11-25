@@ -40,15 +40,18 @@ Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
   `present`. Nel menu, in pausa e nel riepilogo non c'è ciclo: si ridisegna solo su evento, al massimo 60 volte al
   secondo (scelta di Carlo, 22/11; col menu non in primo piano solo se ci passa sopra il mouse). Finestra non in primo piano o ridotta: il
   giro va in pausa e non si disegna. Il pannello F3 si ricalcola dopo `present`, sugli ultimi 4096 campioni.
-- `grafica.rs` e `scena.wgsl`: stanza a griglia, sfera disegnata per pixel (raggio contro sfera), mirino e tempo
-  come rettangoli istanziati, riscritti solo quando cambiano. I dati del frame (visuale, sfera, schermo: 128 byte)
-  vanno nella lista dei comandi come costanti immediate (root constants di DX12), senza `write_buffer`.
-  Il colore della sfera viene dal suo stato (normale, guardata, colpita) con `colore_bersaglio` nello shader; i
-  colori e il tema della stanza stanno nel buffer delle uniformi, riscritto solo quando cambiano. Un colpo lascia per
-  120 ms un lampo nel colore "colpito" dove era la sfera (una draw in più).
+- `grafica.rs` e `scena.wgsl`: stanza a griglia, sfere disegnate per pixel (raggio contro sfera, fino a 8 istanze in
+  una draw), mirino, tempo, conto alla rovescia e punteggio dal vivo come rettangoli istanziati, riscritti solo
+  quando cambiano. I dati del frame (visuale, tempo di gioco, sfera guardata, opacità del lampo, schermo: 128 byte)
+  vanno nella lista dei comandi come costanti immediate (root constants di DX12), senza `write_buffer`. Il moto
+  delle sfere lo calcola anche lo shader: ogni sfera ha un tratto (angoli e velocità di partenza, istante) e un
+  istante di comparsa; il buffer delle sfere si riscrive solo quando un tratto cambia (un colpo, un cambio di
+  direzione), non a ogni frame. Il colore di una sfera viene dal suo stato (normale, guardata, colpita) con
+  `colore_bersaglio` nello shader; i colori e il tema della stanza stanno nello stesso buffer. Un colpo lascia per
+  120 ms un lampo nel colore "colpito" dove era la sfera: un'istanza in più, ferma, dopo le sfere in campo.
 - `mirino.rs`: il mirino a parametri (croce, punto, cerchio; lunghezza, spessore, spazio, bordo, colore). `pezzi` dà
-  la geometria in pixel una volta sola e la usano sia il giro (rettangoli e anelli istanziati) sia l'anteprima del
-  menu: l'anteprima è uguale al giro pixel per pixel.
+  la geometria in pixel una volta sola e la usano sia il giro (rettangoli e anelli istanziati) sia l'anteprima delle
+  impostazioni: l'anteprima è uguale al giro pixel per pixel.
 - `aspetto.rs`: i colori dei bersagli e i tre temi della stanza (Grafite, quella di prima; Notte; Sabbia).
 - `suoni.rs`: colpo, errore e comparsa, sintetizzati all'avvio (nessun file, nessun suono di altri), suonati da un
   thread con WASAPI in modalità condivisa (48 kHz stereo float, convertito da Windows). Il frame incrementa un
@@ -56,23 +59,34 @@ Release compilata con `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.
   apre alla richiesta sull'uscita predefinita del momento, tiene in coda un periodo del motore audio (di solito
   10 ms) e dopo 3 secondi di silenzio chiude il flusso, così un'uscita cambiata si prende al suono dopo; se
   l'uscita si stacca mentre suona, si riapre subito senza perdere i suoni in attesa. Il thread ha priorità alta.
-- `impostazioni.rs`: le parti Mirino, Bersagli e stanza, Suoni del menu (la parte Sensibilità sta in
+- `impostazioni.rs`: le parti Mirino, Bersagli e stanza, Suoni della pagina Impostazioni (la parte Sensibilità sta in
   `interfaccia.rs`).
-- `giro.rs`, `camera.rs`, `sensibilita.rs`, `config.rs`: lo scenario, la visuale, la conversione delle sensibilità e
-  le impostazioni. Gradi per count a sensibilità 1: CS2 e Apex Legends 0,022, Valorant 0,07, Overwatch 2 e Destiny 2
-  0,0066, Marathon 0,0033; oppure i cm/360 scritti direttamente. FOV: CS2 e Apex
-  (dal valore del menu con `cl_fovScale`) su 4:3, Marathon col suo moltiplicatore (valore × 0,96 = gradi orizzontali su 16:9), gli altri orizzontali su 16:9. Fonti e date nel commento in cima a
+- `scenari.rs` e `scenari/*.toml`: gli scenari (formato qui sotto). Quelli di aimpro sono dentro l'.exe
+  (`include_str!`), quelli di chi gioca in `%APPDATA%\aimpro\scenari\`.
+- `giro.rs`, `camera.rs`, `sensibilita.rs`, `config.rs`: il giro (sfere, moto, colpi, tracking, conto alla
+  rovescia), la visuale, la conversione delle sensibilità e le impostazioni (con i preferiti e il primo avvio).
+  Gradi per count a sensibilità 1: CS2 e Apex Legends 0,022, Valorant 0,07, Overwatch 2 e Destiny 2 0,0066,
+  Marathon 0,0033; oppure i cm/360 scritti direttamente. FOV: CS2 e Apex (dal valore del menu con `cl_fovScale`) su
+  4:3, Marathon col suo moltiplicatore (valore × 0,96 = gradi orizzontali su 16:9), gli altri orizzontali su 16:9.
+  Fonti e date nel commento in cima a
   `sensibilita.rs`. Sensibilità verticale con un moltiplicatore (`camera::ruota`); sensibilità a caso entro ±N%, a
   ogni giro o ogni N secondi di gioco, col valore usato nel riepilogo (il banco non la usa).
   Gli scenari durano 30 secondi (lo standard scelto da Carlo il 22/11/2026). Record e statistiche sono per id di
-  scenario: uno scenario con un'altra durata ha un altro id.
-- `registro.rs`: per ogni bersaglio colpito il tempo comparsa→colpo (pause tolte), la distanza angolare dal
+  scenario: uno scenario con un'altra durata ha un altro id. Ogni clic si valuta con la visuale e con le posizioni
+  delle sfere del suo istante; il tracking somma il tempo con il mirino su una sfera e il tasto sinistro giù, fra un
+  evento del tasto e l'altro e a ogni frame.
+- `home.rs`: la home (barra Gioca, Libreria, Playlist, Statistiche, Impostazioni), la libreria con ricerca e filtri,
+  la pagina dello scenario e la pagina del primo avvio. Ogni pagina è una funzione: Statistiche e Impostazioni
+  chiamano quelle di `interfaccia.rs`, Playlist la sua in `home.rs`.
+- `registro.rs`: per ogni bersaglio colpito il tempo dal colpo prima (con una sfera sola, o con l'attesa di
+  comparsa, dalla comparsa; pause tolte), la distanza angolare dal
   precedente (per il primo, dalla visuale di partenza) e gli overshoot (il mirino entra nella sfera e ne esce senza
   colpirla, controllato a ogni clic con la visuale del suo istante e a ogni frame dopo il movimento: un passaggio
   che entra ed esce dentro lo stesso frame non si vede, e col limite a 240 fps un frame dura 4,17 ms). Legge il giro
   solo dalla sua parte pubblica; la memoria (1024 bersagli) si prepara all'avvio, nel frame non alloca.
-- `storico.rs`, `esporta.rs`: lo storico dei giri (formato qui sotto), il record per scenario, la sessione e
-  l'esportazione CSV. La schermata Statistiche sta in `interfaccia.rs`, col grafico disegnato dal painter di egui.
+- `storico.rs`, `esporta.rs`: lo storico dei giri (formato qui sotto), il record per scenario, la sessione, gli
+  ultimi giocati e i record recenti della home, e l'esportazione CSV. La pagina Statistiche sta in `interfaccia.rs`,
+  col grafico disegnato dal painter di egui.
 - `latenza.rs`, `misure.rs`, `banco.rs`, `allocazioni.rs`: le misure, il pannello F3 e il banco `--bench`.
 - `aggiornamento.rs`, `rete.rs`: l'aggiornamento dall'app (qui sotto).
 
@@ -118,6 +132,79 @@ python strumenti/finto_github.py <un aimpro.exe da servire> sha-sbagliato   # o 
 e accettano solo indirizzi `https`. Con il solo `AIMPRO_BUILD=5` la prova va contro le release vere (scarica
 l'ultima).
 
+## Gli scenari
+
+La libreria di aimpro ha 26 scenari originali in 5 categorie, tutti da 30 secondi: clic su bersagli fermi (scatto,
+pianura, ventaglio, altura, orizzonte), clic su bersagli in movimento (deriva, corrente, rapide, scarto, vortice),
+tracking (nastro, filo, binario, guizzo, lucciola, raffica), cambio di bersaglio (coppia, terna, costellazione,
+sciame, stormo), precisione e reazione (chicco, spillo, cruna, riflesso, sentinella). KovaaK's e Aim Lab sono solo
+l'ispirazione del genere: nomi, parametri e descrizioni sono nostri.
+
+Uno scenario è un file TOML. Per aggiungerne uno basta metterlo in `%APPDATA%\aimpro\scenari\` (al più 200 file
+`.toml`, letti all'avvio in ordine di nome): compare nella libreria, nella sua categoria. Un file rovinato o con un
+id già usato si salta, e la home lo dice in una riga con il nome del file e il motivo (al più 3 righe e il numero
+degli altri); non blocca niente.
+
+```toml
+formato = 1                       # versione del formato; un numero più alto si salta
+id = "mio"                        # lettere, cifre, - e _ (al più 40): record e statistiche sono per id
+nome = "Il mio scenario"          # al più 40 caratteri
+categoria = "cambio"              # fermi, movimento, tracking, cambio, precisione; se manca, dalle regole
+difficolta = "media"              # facile, media (se manca), difficile, estrema
+descrizione = "Due sfere ferme."  # al più 200 caratteri
+durata_s = 30.0                   # 5-300, 30 se manca (lo standard)
+punteggio = "colpi"               # "colpi" o "tracking"
+
+[bersagli]
+numero = 2                        # 1-8 sfere in campo insieme
+raggio = 0.4                      # metri, 0,05-2
+distanza = 12.0                   # metri dall'occhio, 3-16 (12 se manca)
+distanza_minima_gradi = 10.0      # fra le sfere e dalla sfera di prima, 0-40
+ritardo_min_ms = 0                # attesa a caso prima che una sfera nuova compaia (reazione), 0-10000
+ritardo_max_ms = 0
+
+[zona]                            # dove nascono le sfere, in gradi dal centro
+imbardata_gradi = 40.0            # 0-80, a destra e a sinistra
+beccheggio_min_gradi = -10.0      # -45-45
+beccheggio_max_gradi = 20.0
+
+[movimento]                       # se manca, le sfere stanno ferme
+tipo = "lineare"                  # "fermo", "lineare" (rimbalza ai bordi della zona) o "casuale"
+velocita_gradi_s = 12.0           # 0-180
+cambio_min_ms = 400               # solo per "casuale": ogni quanto cambia direzione, 50-10000
+cambio_max_ms = 900
+```
+
+Campi sconosciuti o valori fuori dai limiti rendono il file rovinato (l'avviso dice la riga o il campo); anche una
+sfera troppo grande per la sua distanza (il raggio, al 200%, non può superare un quarto della distanza). Se la zona
+non ha altezza (o larghezza) tutta la velocità va sull'altro asse. Nei giri
+"colpi" ogni clic sulla sfera guardata è un colpo e ogni clic a vuoto un errore; con più sfere conta quella col
+centro più vicino al mirino. Nei giri "tracking" il punteggio è la percentuale del giro con il mirino su una sfera e
+il tasto sinistro premuto (scelta di Carlo, 25/11/2026). Con un'attesa di comparsa il tempo medio del riepilogo è
+quello dalla comparsa al colpo.
+
+Nella pagina dello scenario si cambiano dimensione e velocità dei bersagli (50-200%, uguali per tutti gli
+scenari): con parametri diversi dal 100% il giro si salva ma non fa record, e riepilogo e pagina dello scenario lo
+dicono (scelta di Carlo, 25/11/2026). Negli scenari con le sfere ferme la velocità non conta: il giro resta standard.
+
+Il giro parte con un conto alla rovescia di 3 secondi (le sfere non ci sono ancora), che si salta con un clic o con
+lo spazio; nel conto non si contano overshoot. R ricomincia subito lo stesso scenario dal giro, dalla pausa o dal
+riepilogo (il giro interrotto non si salva). Riprendi e Rigioca rispondono solo dopo 400 ms (scelta di Carlo,
+25/11/2026): un clic di troppo dal giro non li preme. Nel tracking, dopo R o alla ripresa dalla pausa, il tasto
+sinistro tenuto giù conta solo dopo averlo rilasciato e ripremuto: il Raw Input dice quando si preme, non se è
+già giù. Punteggio e precisione dal vivo stanno in alto a sinistra (nel tracking la percentuale del tempo giocato
+finora); si spengono in Impostazioni.
+
+## La home
+
+All'avvio la home: a sinistra la barra Gioca, Libreria, Playlist, Statistiche, Impostazioni. Gioca mostra lo scenario
+scelto, gli ultimi giocati, i preferiti e i record recenti (dallo storico, appena il thread che lo legge ha finito).
+La libreria divide gli scenari per categoria, con ricerca per nome e descrizione (senza badare a maiuscole e
+accenti) e filtri per categoria, difficoltà e preferiti. La pagina dello scenario ha descrizione, record, ultimi
+punteggi, preferito, parametri, Statistiche e Gioca. I preferiti stanno in `config.toml` (`preferiti`, una lista di
+id). Al primo avvio, senza `config.toml`, una pagina sola chiede gioco, sensibilità e DPI; poi
+`primo_avvio_fatto = true`, e un `config.toml` di prima senza il campo la salta.
+
 ## Lo storico dei giri
 
 Un file TOML per giro in `%APPDATA%\aimpro\storico\`, scritto in `fine_giro` dopo il present dell'ultimo frame
@@ -126,7 +213,7 @@ esiste già, `-2`, `-3`…; dell'id nel nome restano solo lettere e cifre ASCII 
 scrive nello storico.
 
 ```toml
-formato = 1                     # versione del formato; un file con un numero più alto si salta
+formato = 2                     # versione del formato; un file con un numero più alto si salta
 scenario = "scatto"             # id dello scenario: record e statistiche sono per id
 data = "2026-11-22 14:00:34"    # ora locale di fine giro
 istante_ms = 1795352434530      # ms dal 1970 in UTC: l'ordine dei giri
@@ -136,6 +223,8 @@ errori = 0
 precisione = 1.0                # colpi / clic, fra 0 e 1; manca se non ci sono clic
 tempo_medio_ms = 338.28         # manca se non ci sono colpi
 overshoot = 89                  # tutti, anche sul bersaglio rimasto in campo alla fine
+punteggio = 88.0                # i colpi, o nel tracking la percentuale (0-100); nel formato 1 manca: sono i colpi
+tracking = 0.62                 # solo negli scenari di tracking: la frazione del giro sulla sfera, tasto premuto
 
 [impostazioni]                  # quelle con cui si è giocato il giro
 gioco = "cs2"                   # cs2, valorant, apex, overwatch2, destiny2, marathon, cm360
@@ -147,17 +236,22 @@ vsync = false
 limite_fps = 0                  # 0 = nessun limite
 versione = "0.1.0"              # versione di aimpro
 
+[parametri]                     # dimensione e velocità dei bersagli; nel formato 1 manca: standard
+dimensione = 1.0
+velocita = 1.0
+
 [[bersagli]]                    # uno per bersaglio colpito, in ordine (al più 1024)
-tempo_ms = 297.44               # comparsa → colpo
+tempo_ms = 297.44               # dal colpo prima (con una sfera sola, dalla comparsa)
 distanza_gradi = 24.78          # dal bersaglio precedente
 overshoot = 1
 ```
 
 All'avvio un thread legge tutti i file, mentre la finestra si apre (il primo che serve lo storico, a fine giro o
 nelle Statistiche, lo aspetta); uno rovinato (o di un formato più nuovo, o senza i campi obbligatori) si salta e
-si conta, e la schermata Statistiche lo dice. In memoria i giri restano senza i bersagli. Il record di uno scenario
-sono i colpi del suo giro migliore; "nuovo record" quando un giro lo supera (pareggiarlo no; il primo giro di uno
-scenario è record se ha almeno un colpo). Uno scenario nuovo usa un suo `scenario = "<id>"` e gli stessi campi; campi in più vanno
+si conta, e la schermata Statistiche lo dice. I file del formato 1 si leggono ancora. In memoria i giri restano senza
+i bersagli. Il record di uno scenario è il punteggio del suo giro migliore fra quelli coi parametri standard; "nuovo
+record" quando un giro lo supera (pareggiarlo no; il primo giro di uno scenario è record se ha punteggio più di
+zero). Uno scenario nuovo usa un suo `scenario = "<id>"` e gli stessi campi; campi in più vanno
 aggiunti con un valore predefinito (`#[serde(default)]`), così i file vecchi si leggono ancora; un cambio che i
 file vecchi non reggono alza `formato`.
 
@@ -170,7 +264,7 @@ con la virgola, data `GG/MM/AAAA hh:mm:ss`, UTF-8 con il BOM, righe chiuse da CR
 ```
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # 130 test: sensibilità e variazione, impostazioni, mirino, colori, suoni, menu, visuale, giro, registro, storico, CSV, misure, tempo, aggiornamento
+cargo test                      # 184 test: scenari, giro, tracking, shader, home, sensibilità e variazione, impostazioni, mirino, colori, suoni, menu, visuale, registro, storico, CSV, misure, tempo, aggiornamento
 cargo run --release             # il gioco, a schermo intero (Esc pausa, F3 pannello della latenza)
 cargo run --release -- --finestra            # in una finestra normale
 cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce, scrive misure\bench-<ora>.md
@@ -300,6 +394,28 @@ quindi l'ultimo tratto, 0,5 ms prima della scadenza, si fa girando a vuoto. Un t
 al ritardo visto) qui non scende, perché i ritardi alti sono frequenti; accorciarlo a forza farebbe arrivare più
 frame in ritardo (frame pacing peggiore) e resta fuori, perché la latenza e il ritmo dei frame vengono prima. Il
 tratto a vuoto costa circa il 7% di un core a 240 fps.
+
+### Scenari prima e dopo (25/11/2026, task degli scenari e della home)
+
+Quattro banchi completi alternati, `--secondi 15`, tutte le fasi valide: "prima" è `main` eb3d118, "dopo" il branch
+con scenari, home e punteggio dal vivo acceso. Count→present vecchio nel giro di scatto a vsync spento, senza limite
+(mediana / 99° / 99,9°, ms):
+
+| giro | prima | dopo |
+|---|---|---|
+| primo | 0,33 / 0,58 / 1,04 | 0,33 / 0,73 / 1,29 |
+| secondo | 0,33 / 0,75 / 1,31 | 0,33 / 0,70 / 1,33 |
+
+La mediana non cambia e il 99° sta nella stessa variazione da un giro all'altro (0,58-0,75 prima, 0,70-0,73 dopo).
+Allocazioni del codice di aimpro nel frame: 0 prima e dopo, in ogni fase; dentro wgpu 68 per frame in tutte e due.
+Gli scenari nuovi, a vsync spento: deriva 0,32 / 0,49, filo 0,31 / 0,49, guizzo 0,31 / 0,49, terna 0,32 / 0,50,
+sciame 0,32 / 0,49 (mediana / 99°), circa 3900-4000 frame al secondo, 0 allocazioni di aimpro. I file stanno in
+`verifiche\aimpro-20261121-scenari\banco\` sul PC di Carlo.
+
+Dopo l'unione con aspetto (#14: colori, lampo, suoni), altri quattro banchi alternati la stessa sera: "prima" è
+`main` fd94030, "dopo" il branch unito. Giro di scatto a vsync spento: 0,33 / 0,60 e 0,35 / 0,66 prima, 0,34 / 0,64 e
+0,36 / 0,64 dopo (mediana / 99°); col vsync 3,87-3,88 / 4,38-4,39 in tutti e quattro. Tutte le fasi valide, 0
+allocazioni di aimpro nel frame, anche nella fase coi suoni e negli scenari (0,32-0,33 / 0,51-0,55).
 
 ### Da PresentMon (22/11/2026, PresentMon 2.6.0 insieme a `aimpro --bench --secondi 15`)
 

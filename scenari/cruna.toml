@@ -1,0 +1,23 @@
+# Il bersaglio più piccolo della libreria.
+formato = 1
+id = "cruna"
+nome = "Cruna"
+categoria = "precisione"
+difficolta = "estrema"
+descrizione = "Sfere minuscole e lontane in tutta la zona: precisione al limite."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 1
+raggio = 0.12
+distanza = 14.0
+distanza_minima_gradi = 8.0
+
+[zona]
+imbardata_gradi = 40.0
+beccheggio_min_gradi = -10.0
+beccheggio_max_gradi = 20.0
+
+[movimento]
+tipo = "fermo"

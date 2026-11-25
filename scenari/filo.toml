@@ -1,0 +1,24 @@
+# Tracking preciso: una sfera piccola con un moto regolare, da seguire senza staccarsi.
+formato = 1
+id = "filo"
+nome = "Filo"
+categoria = "tracking"
+difficolta = "media"
+descrizione = "Segui una sfera piccola che si muove regolare, col tasto sinistro premuto."
+durata_s = 30.0
+punteggio = "tracking"
+
+[bersagli]
+numero = 1
+raggio = 0.25
+distanza = 12.0
+distanza_minima_gradi = 0.0
+
+[zona]
+imbardata_gradi = 30.0
+beccheggio_min_gradi = -5.0
+beccheggio_max_gradi = 15.0
+
+[movimento]
+tipo = "lineare"
+velocita_gradi_s = 18.0

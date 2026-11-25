@@ -1,0 +1,26 @@
+# Cambio di bersaglio su sfere che si muovono e cambiano direzione.
+formato = 1
+id = "sciame"
+nome = "Sciame"
+categoria = "cambio"
+difficolta = "difficile"
+descrizione = "Tre sfere che si muovono e cambiano direzione: passa dall'una all'altra; ogni sfera colpita rinasce altrove."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 3
+raggio = 0.45
+distanza = 12.0
+distanza_minima_gradi = 10.0
+
+[zona]
+imbardata_gradi = 35.0
+beccheggio_min_gradi = -8.0
+beccheggio_max_gradi = 18.0
+
+[movimento]
+tipo = "casuale"
+velocita_gradi_s = 10.0
+cambio_min_ms = 600
+cambio_max_ms = 1500

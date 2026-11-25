@@ -1,0 +1,23 @@
+# Precisione su scatti corti.
+formato = 1
+id = "chicco"
+nome = "Chicco"
+categoria = "precisione"
+difficolta = "media"
+descrizione = "Sfere piccole e ferme in una zona stretta: prima giusto, poi veloce."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 1
+raggio = 0.24
+distanza = 12.0
+distanza_minima_gradi = 5.0
+
+[zona]
+imbardata_gradi = 20.0
+beccheggio_min_gradi = -5.0
+beccheggio_max_gradi = 12.0
+
+[movimento]
+tipo = "fermo"

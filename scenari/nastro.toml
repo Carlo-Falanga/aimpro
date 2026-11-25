@@ -1,0 +1,24 @@
+# Tracking per cominciare.
+formato = 1
+id = "nastro"
+nome = "Nastro"
+categoria = "tracking"
+difficolta = "facile"
+descrizione = "Segui una sfera grande che si muove lenta e regolare, col tasto sinistro premuto."
+durata_s = 30.0
+punteggio = "tracking"
+
+[bersagli]
+numero = 1
+raggio = 0.5
+distanza = 12.0
+distanza_minima_gradi = 0.0
+
+[zona]
+imbardata_gradi = 30.0
+beccheggio_min_gradi = -5.0
+beccheggio_max_gradi = 15.0
+
+[movimento]
+tipo = "lineare"
+velocita_gradi_s = 10.0

@@ -1,0 +1,23 @@
+# Cambio di bersaglio su sfere ferme: tre in campo, ognuna colpita rinasce lontano dalle altre.
+formato = 1
+id = "terna"
+nome = "Terna"
+categoria = "cambio"
+difficolta = "media"
+descrizione = "Tre sfere ferme in campo: passa dall'una all'altra; ogni sfera colpita rinasce altrove."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 3
+raggio = 0.4
+distanza = 12.0
+distanza_minima_gradi = 10.0
+
+[zona]
+imbardata_gradi = 35.0
+beccheggio_min_gradi = -8.0
+beccheggio_max_gradi = 18.0
+
+[movimento]
+tipo = "fermo"

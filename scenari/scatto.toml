@@ -1,0 +1,23 @@
+# Lo scenario di partenza di aimpro.
+formato = 1
+id = "scatto"
+nome = "Scatto"
+categoria = "fermi"
+difficolta = "media"
+descrizione = "Una sfera ferma alla volta: appena la colpisci ne compare un'altra in un altro punto."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 1
+raggio = 0.4
+distanza = 12.0
+distanza_minima_gradi = 10.0
+
+[zona]
+imbardata_gradi = 40.0
+beccheggio_min_gradi = -10.0
+beccheggio_max_gradi = 20.0
+
+[movimento]
+tipo = "fermo"

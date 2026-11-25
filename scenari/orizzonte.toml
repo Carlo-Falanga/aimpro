@@ -1,0 +1,23 @@
+# Bersagli lontani: più piccoli a parità di raggio.
+formato = 1
+id = "orizzonte"
+nome = "Orizzonte"
+categoria = "fermi"
+difficolta = "difficile"
+descrizione = "Sfere ferme e lontane, quindi piccole sullo schermo, in una zona ampia."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 1
+raggio = 0.4
+distanza = 16.0
+distanza_minima_gradi = 12.0
+
+[zona]
+imbardata_gradi = 50.0
+beccheggio_min_gradi = -10.0
+beccheggio_max_gradi = 22.0
+
+[movimento]
+tipo = "fermo"

@@ -1,16 +1,15 @@
-// La scena di aimpro: la stanza a griglia, la sfera (calcolata per pixel, senza mesh) e i rettangoli del mirino e
+// La scena di aimpro: la stanza a griglia, le sfere (calcolate per pixel, senza mesh) e i rettangoli del mirino e
 // del tempo. Niente texture né buffer di profondità: la stanza è un parallelepipedo visto da dentro, ogni pixel ne
-// vede una faccia sola, e la sfera si disegna sopra.
+// vede una faccia sola, e le sfere si disegnano sopra (si toccano di rado: l'ordine delle istanze basta).
 
 // Quello che cambia a ogni frame arriva come costanti immediate (root constants di DirectX 12, 128 byte): stanno
 // nella lista dei comandi, senza buffer da copiare.
 struct Immediati {
     vp: mat4x4<f32>,
-    // xyz centro della sfera, w raggio (0 = nessuna sfera)
-    sfera: vec4<f32>,
-    // w: lo stato della sfera per il suo colore (0 normale, 1 guardata, 2 colpita)
+    // x tempo di gioco in secondi (il moto delle sfere), y indice della sfera guardata (-1 nessuna),
+    // z opacità del lampo della sfera colpita, w indice dell'istanza del lampo (-1 nessuno)
+    tempo: vec4<f32>,
     destra: vec4<f32>,
-    // w: l'opacità della sfera (1, meno nel lampo del colpo)
     su: vec4<f32>,
     // larghezza, altezza in pixel, frazione di tempo rimasta, scala dell'interfaccia
     schermo: vec4<f32>,
@@ -18,8 +17,16 @@ struct Immediati {
 
 var<immediate> f: Immediati;
 
-// Quello che non cambia nel giro (l'occhio, i colori dei bersagli, il tema della stanza) sta in un buffer,
-// riscritto solo quando cambia.
+// Una sfera: il suo tratto di moto. moto = imbardata e beccheggio di partenza, velocità (radianti al secondo);
+// altro = istante di partenza (secondi di gioco), raggio, distanza dall'occhio, istante in cui compare.
+struct Sfera {
+    moto: vec4<f32>,
+    altro: vec4<f32>,
+};
+
+// Quello che nel giro cambia di rado (l'occhio, i colori dei bersagli, il tema della stanza, la zona dei rimbalzi e
+// i tratti delle sfere) sta in un buffer, riscritto solo quando cambia: a una sfera colpita o a un cambio di
+// direzione, non a ogni frame.
 struct Uniformi {
     occhio: vec4<f32>,
     bersaglio_normale: vec4<f32>,
@@ -29,6 +36,10 @@ struct Uniformi {
     soffitto: vec4<f32>,
     pareti: vec4<f32>,
     linee: vec4<f32>,
+    // imbardata minima, massima, beccheggio minimo, massimo dei centri
+    zona: vec4<f32>,
+    // le sfere in campo e, subito dopo l'ultima, quella del lampo (ferma dove è stata colpita)
+    sfere: array<Sfera, 9>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniformi;
@@ -90,51 +101,101 @@ fn fs_stanza(i: UscitaStanza) -> @location(0) vec4<f32> {
     return vec4<f32>(c, 1.0);
 }
 
-// ---------------------------------------------------------------- sfera
+// ---------------------------------------------------------------- sfere
+
+// x riportato in [lo, hi] come una palla che rimbalza ai bordi: lo stesso conto di `giro::rifletti`.
+fn rifletti(x: f32, lo: f32, hi: f32) -> f32 {
+    let w = hi - lo;
+    if (w <= 0.0) {
+        return lo;
+    }
+    let d = x - lo;
+    let p = d - 2.0 * w * floor(d / (2.0 * w));
+    return select(lo + 2.0 * w - p, lo + p, p <= w);
+}
+
+// Il centro della sfera al tempo di gioco di questo frame, come in `Giro::centro_a`.
+fn centro(s: Sfera) -> vec3<f32> {
+    let dt = f.tempo.x - s.altro.x;
+    let imb = rifletti(s.moto.x + s.moto.z * dt, u.zona.x, u.zona.y);
+    let bec = rifletti(s.moto.y + s.moto.w * dt, u.zona.z, u.zona.w);
+    let cp = cos(bec);
+    return u.occhio.xyz + vec3<f32>(sin(imb) * cp, sin(bec), -cos(imb) * cp) * s.altro.z;
+}
 
 struct UscitaSfera {
     @builtin(position) pos: vec4<f32>,
     @location(0) mondo: vec3<f32>,
+    // xyz centro, w raggio: uguali per tutto il quadrato
+    @location(1) @interpolate(flat) sfera: vec4<f32>,
+    @location(2) @interpolate(flat) indice: u32,
 };
 
 @vertex
-fn vs_sfera(@builtin(vertex_index) v: u32) -> UscitaSfera {
-    // Un quadrato di due triangoli rivolto alla camera, un po' più grande della sfera.
+fn vs_sfera(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> UscitaSfera {
+    // Un quadrato di due triangoli rivolto alla camera, un po' più grande della sfera; un'istanza per sfera.
     var angoli = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
         vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0),
     );
+    let s = u.sfere[i];
+    let c = centro(s);
+    let r = s.altro.y;
     let a = angoli[v];
-    let p = f.sfera.xyz + (f.destra.xyz * a.x + f.su.xyz * a.y) * f.sfera.w * 1.6;
+    let p = c + (f.destra.xyz * a.x + f.su.xyz * a.y) * r * 1.6;
     var o: UscitaSfera;
     o.pos = f.vp * vec4<f32>(p, 1.0);
+    if (f.tempo.x < s.altro.w) {
+        // Non ancora comparsa (scenari di reazione): il quadrato va fuori dal volume visibile e non si disegna.
+        o.pos = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+    }
     o.mondo = p;
+    o.sfera = vec4<f32>(c, r);
+    o.indice = i;
     return o;
+}
+
+// Il colore della sfera nel punto con normale n, visto in direzione rd.
+fn colore_sfera(n: vec3<f32>, rd: vec3<f32>, indice: u32) -> vec3<f32> {
+    let luce = normalize(vec3<f32>(0.35, 0.8, 0.45));
+    let diffusa = max(dot(n, luce), 0.0);
+    let bordo = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
+    return vec3<f32>(1.0, 0.69, 0.13) * (0.38 + 0.62 * diffusa) + vec3<f32>(1.0, 0.9, 0.6) * bordo * 0.35;
 }
 
 @fragment
 fn fs_sfera(i: UscitaSfera) -> @location(0) vec4<f32> {
-    let r = f.sfera.w;
+    let c = i.sfera.xyz;
+    let r = i.sfera.w;
     let rd = normalize(i.mondo - u.occhio.xyz);
-    let oc = f.sfera.xyz - u.occhio.xyz;
+    let oc = c - u.occhio.xyz;
     let b = dot(oc, rd);
     let d2 = dot(oc, oc) - b * b;
     let dist = sqrt(max(d2, 0.0)) - r;
     // Bordo morbido largo un pixel.
-    let alfa = clamp(0.5 - dist / max(fwidth(dist), 1e-6), 0.0, 1.0) * f.su.w;
+    // L'istanza del lampo sfuma; le altre sono piene.
+    let lampo = f32(i.indice) == f.tempo.w;
+    let alfa = clamp(0.5 - dist / max(fwidth(dist), 1e-6), 0.0, 1.0) * select(1.0, f.tempo.z, lampo);
     if (alfa <= 0.0) {
         discard;
     }
     let h = sqrt(max(r * r - d2, 0.0));
     let punto = u.occhio.xyz + rd * (b - h);
-    let n = normalize(punto - f.sfera.xyz);
+    let n = normalize(punto - c);
+    // Lo stato per il colore: 2 la sfera del lampo, 1 quella guardata, 0 le altre.
+    var stato = 0.0;
+    if (lampo) {
+        stato = 2.0;
+    } else if (f32(i.indice) == f.tempo.y) {
+        stato = 1.0;
+    }
     let luce = normalize(vec3<f32>(0.35, 0.8, 0.45));
     let diffusa = max(dot(n, luce), 0.0);
     let bordo = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
-    let colore = colore_bersaglio(f.destra.w);
+    let colore = colore_bersaglio(stato);
     // Il riflesso sul bordo: lo stesso colore schiarito (con l'arancione di base è quello di prima).
-    let c = colore * (0.38 + 0.62 * diffusa) + mix(colore, vec3<f32>(1.0), 0.6) * bordo * 0.35;
-    return vec4<f32>(c * alfa, alfa);
+    let col = colore * (0.38 + 0.62 * diffusa) + mix(colore, vec3<f32>(1.0), 0.6) * bordo * 0.35;
+    return vec4<f32>(col * alfa, alfa);
 }
 
 // ---------------------------------------------------------------- rettangoli (mirino e tempo)

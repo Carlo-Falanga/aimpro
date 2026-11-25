@@ -8,6 +8,9 @@
 //! - Niente buffer di profondità né multisample: una stanza vista da dentro, una sfera e dei rettangoli.
 //! - A ogni frame vanno nella lista dei comandi solo 128 byte di costanti immediate; i rettangoli si riscrivono
 //!   quando cambia il secondo mostrato o la risoluzione.
+//! - Le sfere (fino a `MAX_SFERE`, disegnate in un'istanza ciascuna) stanno nel buffer delle uniformi con il loro
+//!   tratto di moto: lo shader ne calcola il centro dal tempo di gioco, quindi il buffer si riscrive solo quando un
+//!   tratto cambia (sfera colpita, cambio di direzione), non a ogni frame.
 
 use std::sync::Arc;
 
@@ -18,8 +21,13 @@ use winit::window::Window;
 
 use crate::aspetto::{self, ColoriBersaglio, Tema};
 use crate::mirino::{self, Mirino};
+pub use crate::scenari::MAX_SFERE;
 
-const MAX_RETT: usize = 64;
+/// Punteggio e precisione in percento del giro, per il disegno.
+pub type DalVivo = Option<(u32, Option<u32>)>;
+
+/// Mirino 8, tempo 16, conto alla rovescia 7, punteggio dal vivo fino a 42: c'è margine.
+const MAX_RETT: usize = 128;
 /// Descrittori di texture e buffer che gli shader possono vedere insieme: ne usiamo meno di dieci (le uniformi e
 /// le texture di egui); 16 384 lasciano un margine largo e costano 0,5 MB.
 const DESCRITTORI: u32 = 16_384;
@@ -31,7 +39,8 @@ const DESCRITTORI: u32 = 16_384;
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Immediati {
     vp: [[f32; 4]; 4],
-    sfera: [f32; 4],
+    /// Tempo di gioco in secondi (per il moto delle sfere), indice della sfera guardata (-1 nessuna), libero, libero.
+    tempo: [f32; 4],
     destra: [f32; 4],
     su: [f32; 4],
     schermo: [f32; 4],
@@ -41,8 +50,18 @@ struct Immediati {
 const DIMENSIONE_IMMEDIATI: u32 = 128;
 const _: () = assert!(std::mem::size_of::<Immediati>() as u32 <= DIMENSIONE_IMMEDIATI);
 
-/// Quello che nel giro non cambia (l'occhio, i colori dei bersagli, il tema della stanza): si riscrive solo quando
-/// cambia.
+/// Una sfera per lo shader: il tratto di moto (`moto` = imbardata e beccheggio di partenza, velocità in radianti al
+/// secondo; `altro` = istante di partenza in secondi di gioco, raggio, distanza, istante di comparsa in secondi di
+/// gioco: prima la sfera non si disegna).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, PartialEq, Debug, Default)]
+pub struct SferaGpu {
+    pub moto: [f32; 4],
+    pub altro: [f32; 4],
+}
+
+/// Quello che nel giro cambia di rado (l'occhio, i colori dei bersagli, il tema della stanza, la zona, i tratti delle
+/// sfere): si riscrive solo quando cambia.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
 struct Uniformi {
@@ -54,6 +73,24 @@ struct Uniformi {
     soffitto: [f32; 4],
     pareti: [f32; 4],
     linee: [f32; 4],
+    /// Imbardata minima e massima, beccheggio minimo e massimo dei centri (radianti): i bordi dei rimbalzi.
+    zona: [f32; 4],
+    /// Le sfere in campo e, subito dopo l'ultima, quella del lampo.
+    sfere: [SferaGpu; MAX_SFERE + 1],
+}
+
+/// Le sfere di un frame.
+#[derive(Clone, Copy, Debug)]
+pub struct Sfere {
+    pub dati: [SferaGpu; MAX_SFERE],
+    pub n: u32,
+    pub zona: [f32; 4],
+    /// Tempo di gioco in secondi.
+    pub tempo_s: f32,
+    /// La sfera sotto il mirino (il suo colore è "guardato").
+    pub guardata: Option<u32>,
+    /// La sfera appena colpita, ferma dove era, e l'opacità del lampo.
+    pub lampo: Option<(SferaGpu, f32)>,
 }
 
 /// Un rettangolo del mirino o del tempo. `tipo`: 0 pieno, 1 barra del tempo, 2 anello (`anello` = raggi interno ed
@@ -73,14 +110,14 @@ pub struct Scena {
     pub occhio: DVec3,
     pub destra: DVec3,
     pub su: DVec3,
-    /// Centro e raggio della sfera.
-    pub sfera: Option<(DVec3, f64)>,
-    /// Lo stato della sfera per il suo colore (`aspetto::StatoBersaglio`).
-    pub stato_sfera: f32,
-    /// La sfera appena colpita, nel punto dove era: centro, raggio e opacità del lampo.
-    pub lampo: Option<(DVec3, f64, f32)>,
+    /// Le sfere da disegnare; `None` nel menu e durante il conto alla rovescia.
+    pub sfere: Option<Sfere>,
     /// Secondi rimasti e frazione (per il tempo in alto); `None` fuori dal giro.
     pub tempo: Option<(u32, f32)>,
+    /// Il conto alla rovescia (3, 2, 1) al centro, prima del giro.
+    pub conto: Option<u32>,
+    /// Punteggio e precisione in percento, in alto a sinistra; `None` se spento o fuori dal giro.
+    pub dal_vivo: DalVivo,
 }
 
 /// Il disegno di egui da aggiungere sopra la scena.
@@ -119,8 +156,9 @@ pub struct Grafica {
     gruppo: wgpu::BindGroup,
     rett: [Rett; MAX_RETT],
     n_rett: usize,
-    /// Secondi e dimensioni dell'ultima scrittura dei rettangoli; se cambiano si riscrivono.
-    rett_scritti: (u32, u32, u32, bool),
+    /// Secondi, conto alla rovescia, dimensioni e punteggio dal vivo dell'ultima scrittura dei rettangoli; se
+    /// cambiano si riscrivono.
+    rett_scritti: (u32, u32, u32, u32, bool, DalVivo),
     scala: f32,
     mirino: Mirino,
     colori: ColoriBersaglio,
@@ -352,7 +390,7 @@ impl Grafica {
             gruppo,
             rett: [Rett::default(); MAX_RETT],
             n_rett: 0,
-            rett_scritti: (u32::MAX, 0, 0, false),
+            rett_scritti: (u32::MAX, 0, 0, 0, false, None),
             scala: finestra_scala(),
             mirino: Mirino::default(),
             colori: ColoriBersaglio::default(),
@@ -364,7 +402,7 @@ impl Grafica {
     pub fn imposta_aspetto(&mut self, m: Mirino, colori: ColoriBersaglio, tema: Tema) {
         if m != self.mirino {
             self.mirino = m;
-            self.rett_scritti = (u32::MAX, 0, 0, false);
+            self.rett_scritti = (u32::MAX, 0, 0, 0, false, None);
         }
         self.colori = colori;
         self.tema = tema;
@@ -378,7 +416,7 @@ impl Grafica {
         self.config.height = altezza;
         self.scala = scala.max(1.0);
         self.surface.configure(&self.device, &self.config);
-        self.rett_scritti = (u32::MAX, 0, 0, false);
+        self.rett_scritti = (u32::MAX, 0, 0, 0, false, None);
     }
 
     pub fn imposta_vsync(&mut self, vsync: bool) {
@@ -421,29 +459,34 @@ impl Grafica {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
 
         let mut immediati = Immediati::zeroed();
-        let mut immediati_lampo = None;
         if let Some(s) = scena {
             let (secondi, frazione) = s.tempo.unwrap_or((0, 0.0));
-            let (cx, cy, r) = s.sfera.map_or((0.0, 0.0, 0.0), |(c, r)| (c.x, c.y, r));
-            let cz = s.sfera.map_or(0.0, |(c, _)| c.z);
-            // destra.w = stato della sfera (il suo colore), su.w = opacità.
+            let guardata = s.sfere.and_then(|x| x.guardata).map_or(-1.0, |i| i as f32);
+            let lampo = s.sfere.and_then(|x| x.lampo.map(|(_, a)| (x.n as f32, a)));
+            // tempo = tempo di gioco, sfera guardata, opacità del lampo, indice dell'istanza del lampo (-1 nessuno).
             immediati = Immediati {
                 vp: s.vp.to_cols_array_2d(),
-                sfera: [cx as f32, cy as f32, cz as f32, r as f32],
-                destra: [s.destra.x as f32, s.destra.y as f32, s.destra.z as f32, s.stato_sfera],
-                su: [s.su.x as f32, s.su.y as f32, s.su.z as f32, 1.0],
+                tempo: [
+                    s.sfere.map_or(0.0, |x| x.tempo_s),
+                    guardata,
+                    lampo.map_or(0.0, |l| l.1),
+                    lampo.map_or(-1.0, |l| l.0),
+                ],
+                destra: [s.destra.x as f32, s.destra.y as f32, s.destra.z as f32, 0.0],
+                su: [s.su.x as f32, s.su.y as f32, s.su.z as f32, 0.0],
                 schermo: [self.config.width as f32, self.config.height as f32, frazione, self.scala],
             };
-            immediati_lampo = s.lampo.map(|(c, r, alfa)| Immediati {
-                sfera: [c.x as f32, c.y as f32, c.z as f32, r as f32],
-                destra: [
-                    immediati.destra[0],
-                    immediati.destra[1],
-                    immediati.destra[2],
-                    aspetto::StatoBersaglio::Colpito.valore(),
-                ],
-                su: [immediati.su[0], immediati.su[1], immediati.su[2], alfa],
-                ..immediati
+            // Senza sfere (menu, conto alla rovescia) si tengono quelle di prima: niente scrittura in più. Lo stesso
+            // per il posto del lampo quando il lampo è finito.
+            let precedenti = self
+                .uniformi_scritte
+                .map_or(([0.0; 4], [SferaGpu::default(); MAX_SFERE + 1]), |u| (u.zona, u.sfere));
+            let (zona, sfere) = s.sfere.map_or(precedenti, |x| {
+                let mut a = precedenti.1;
+                a[..MAX_SFERE].copy_from_slice(&x.dati);
+                let n = (x.n as usize).min(MAX_SFERE);
+                a[n] = x.lampo.map_or(precedenti.1[n], |l| l.0);
+                (x.zona, a)
             });
             let stanza = self.tema.colori();
             let u = Uniformi {
@@ -455,14 +498,18 @@ impl Grafica {
                 soffitto: aspetto::vec4_f(stanza.soffitto),
                 pareti: aspetto::vec4_f(stanza.pareti),
                 linee: aspetto::vec4_f(stanza.linee),
+                zona,
+                sfere,
             };
             if self.uniformi_scritte != Some(u) {
                 self.queue.write_buffer(&self.b_uniformi, 0, bytemuck::bytes_of(&u));
                 self.uniformi_scritte = Some(u);
             }
-            let chiave = (secondi, self.config.width, self.config.height, s.tempo.is_some());
+            let conto = s.conto.unwrap_or(0);
+            let chiave =
+                (secondi, conto, self.config.width, self.config.height, s.tempo.is_some(), s.dal_vivo);
             if chiave != self.rett_scritti {
-                self.prepara_rettangoli(s.tempo.map(|t| t.0));
+                self.prepara_rettangoli(s.tempo.map(|t| t.0), s.conto, s.dal_vivo);
                 self.queue.write_buffer(&self.b_rett, 0, bytemuck::cast_slice(&self.rett[..self.n_rett]));
                 self.rett_scritti = chiave;
             }
@@ -505,16 +552,14 @@ impl Grafica {
                 pass.set_immediates(0, bytemuck::bytes_of(&immediati));
                 pass.set_vertex_buffer(0, self.b_stanza.slice(..));
                 pass.draw(0..self.vertici_stanza, 0..1);
-                if s.sfera.is_some() {
-                    pass.set_pipeline(&self.p_sfera);
-                    pass.draw(0..6, 0..1);
-                }
-                if let Some(l) = &immediati_lampo {
-                    // Il lampo della sfera colpita, sopra a tutto il resto della scena e con la sua opacità.
-                    pass.set_pipeline(&self.p_sfera);
-                    pass.set_immediates(0, bytemuck::bytes_of(l));
-                    pass.draw(0..6, 0..1);
-                    pass.set_immediates(0, bytemuck::bytes_of(&immediati));
+                if let Some(x) = s.sfere {
+                    // Le sfere in campo e, se c'è, il lampo della sfera colpita: l'ultima istanza, quindi sopra le
+                    // altre, con la sua opacità.
+                    let n = x.n.min(MAX_SFERE as u32) + u32::from(x.lampo.is_some());
+                    if n > 0 {
+                        pass.set_pipeline(&self.p_sfera);
+                        pass.draw(0..6, 0..n);
+                    }
                 }
                 if self.n_rett > 0 {
                     pass.set_pipeline(&self.p_rett);
@@ -544,7 +589,7 @@ impl Grafica {
         }
     }
 
-    fn prepara_rettangoli(&mut self, secondi: Option<u32>) {
+    fn prepara_rettangoli(&mut self, secondi: Option<u32>, conto: Option<u32>, dal_vivo: DalVivo) {
         self.n_rett = 0;
         let s = self.scala;
         let (w, h) = (self.config.width as f32, self.config.height as f32);
@@ -569,9 +614,14 @@ impl Grafica {
             let t = (4.0 * s).round().max(2.0);
             let spazio = (7.0 * s).round();
             let y = (22.0 * s).round();
-            let n = sec.min(99);
-            self.cifra(n / 10, (cx - cw - spazio / 2.0).round(), y, cw, ch, t);
-            self.cifra(n % 10, (cx + spazio / 2.0).round(), y, cw, ch, t);
+            if sec >= 100 {
+                // Gli scenari dei file possono durare fino a 300 secondi: tre cifre, centrate.
+                let largo = 3.0 * cw + 2.0 * (6.0 * s).round();
+                self.numero(sec, (cx - largo / 2.0).round(), y, cw, ch, t, [0.92, 0.92, 0.92, 0.9]);
+            } else {
+                self.cifra(sec / 10, (cx - cw - spazio / 2.0).round(), y, cw, ch, t);
+                self.cifra(sec % 10, (cx + spazio / 2.0).round(), y, cw, ch, t);
+            }
             let lb = (220.0 * s).round();
             let hb = (3.0 * s).round().max(2.0);
             let yb = y + ch + (10.0 * s).round();
@@ -579,13 +629,69 @@ impl Grafica {
             self.aggiungi(xb, yb, lb, hb, [1.0, 1.0, 1.0, 0.18], 0.0);
             self.aggiungi(xb, yb, lb, hb, [1.0, 0.69, 0.13, 0.95], 1.0);
         }
+        if let Some(n) = conto {
+            // Il conto alla rovescia: una cifra grande sopra il mirino.
+            let ch = (120.0 * s).round();
+            let cw = (68.0 * s).round();
+            let t = (14.0 * s).round().max(4.0);
+            self.cifra(n % 10, (cx - cw / 2.0).round(), (cy - ch - 60.0 * s).round(), cw, ch, t);
+        }
+        if let Some((punti, precisione)) = dal_vivo {
+            // In alto a sinistra: il punteggio grande e, sotto, la precisione in percento più piccola, in arancio.
+            let x = (28.0 * s).round();
+            let y = (22.0 * s).round();
+            let (ch, cw, t) = ((30.0 * s).round(), (17.0 * s).round(), (4.0 * s).round().max(2.0));
+            self.numero(punti, x, y, cw, ch, t, [0.92, 0.92, 0.92, 0.9]);
+            if let Some(p) = precisione {
+                let (ph, pw, pt) = ((18.0 * s).round(), (10.0 * s).round(), (3.0 * s).round().max(2.0));
+                let yp = y + ch + (10.0 * s).round();
+                let fine = self.numero(p, x, yp, pw, ph, pt, [1.0, 0.69, 0.13, 0.95]);
+                // Il segno di percento: due quadratini e, fra loro, una diagonale a gradini.
+                let arancio = [1.0, 0.69, 0.13, 0.95];
+                let q = pt + 1.0;
+                let xs = fine + (5.0 * s).round();
+                let lw = pw + 2.0 * q;
+                self.aggiungi(xs, yp, q, q, arancio, 0.0);
+                self.aggiungi(xs + lw - q, yp + ph - q, q, q, arancio, 0.0);
+                for i in 0..5 {
+                    let f = i as f32 / 4.0;
+                    let x = (xs + f * (lw - pt)).round();
+                    let y = (yp + ph - pt - f * (ph - pt)).round();
+                    self.aggiungi(x, y, pt, pt, arancio, 0.0);
+                }
+            }
+        }
+    }
+
+    /// Un numero intero (al massimo 3 cifre, senza zeri davanti) da `x` verso destra; dice dove finisce.
+    #[allow(clippy::too_many_arguments)]
+    fn numero(&mut self, n: u32, x: f32, y: f32, w: f32, h: f32, t: f32, colore: [f32; 4]) -> f32 {
+        let n = n.min(999);
+        let cifre = if n >= 100 {
+            3
+        } else if n >= 10 {
+            2
+        } else {
+            1
+        };
+        let passo = w + (6.0 * self.scala).round();
+        let mut resto = n;
+        for i in (0..cifre).rev() {
+            self.cifra_colore(resto % 10, x + i as f32 * passo, y, w, h, t, colore);
+            resto /= 10;
+        }
+        x + cifre as f32 * passo - (6.0 * self.scala).round()
     }
 
     fn cifra(&mut self, n: u32, x: f32, y: f32, w: f32, h: f32, t: f32) {
+        self.cifra_colore(n, x, y, w, h, t, [0.92, 0.92, 0.92, 0.9]);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cifra_colore(&mut self, n: u32, x: f32, y: f32, w: f32, h: f32, t: f32, c: [f32; 4]) {
         let m = SEGMENTI[n as usize % 10];
         let meta = h / 2.0;
         let lato = meta - 1.5 * t;
-        let c = [0.92, 0.92, 0.92, 0.9];
         let segmenti = [
             (0b1000000, x + t, y, w - 2.0 * t, t),
             (0b0100000, x + w - t, y + t, t, lato),
@@ -605,4 +711,38 @@ impl Grafica {
 
 fn finestra_scala() -> f32 {
     1.0
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Lo shader si legge, è valido e si traduce in HLSL come fa wgpu su DirectX 12: un errore si vede nei test, non
+    /// all'avvio del gioco.
+    #[test]
+    fn lo_shader_e_valido_e_diventa_hlsl() {
+        let modulo = naga::front::wgsl::parse_str(include_str!("scena.wgsl")).expect("WGSL");
+        let info = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&modulo)
+        .expect("shader valido");
+        let opzioni = naga::back::hlsl::Options {
+            immediates_target: Some(naga::back::hlsl::BindTarget::default()),
+            ..Default::default()
+        };
+        let mut hlsl = String::new();
+        naga::back::hlsl::Writer::new(&mut hlsl, &opzioni, &Default::default())
+            .write(&modulo, &info, None)
+            .expect("HLSL");
+        assert!(hlsl.contains("vs_sfera") && hlsl.contains("fs_sfera"));
+    }
+
+    #[test]
+    fn i_dati_dello_shader_hanno_le_misure_giuste() {
+        assert_eq!(std::mem::size_of::<Immediati>(), 128);
+        // occhio, 7 colori, zona e 9 sfere da 32 byte (8 più il lampo): come `Uniformi` in scena.wgsl.
+        assert_eq!(std::mem::size_of::<Uniformi>(), 16 * 8 + 16 + 32 * (MAX_SFERE + 1));
+    }
 }

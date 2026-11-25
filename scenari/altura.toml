@@ -1,0 +1,23 @@
+# Scatti verticali.
+formato = 1
+id = "altura"
+nome = "Altura"
+categoria = "fermi"
+difficolta = "media"
+descrizione = "Sfere ferme molto in alto e molto in basso: scatti in verticale."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 1
+raggio = 0.4
+distanza = 12.0
+distanza_minima_gradi = 15.0
+
+[zona]
+imbardata_gradi = 22.0
+beccheggio_min_gradi = -25.0
+beccheggio_max_gradi = 38.0
+
+[movimento]
+tipo = "fermo"

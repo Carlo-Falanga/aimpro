@@ -1,32 +1,13 @@
 //! I colori dei bersagli (normale, guardato, colpito) e i temi della stanza.
 //!
 //! Vanno alla scheda video nel buffer delle uniformi, riscritto solo quando cambiano (`grafica.rs`): lo shader
-//! sceglie il colore di ogni sfera dal suo stato con `colore_bersaglio`, quindi regge anche con più sfere.
+//! sceglie il colore di ogni sfera dal suo stato con `colore_bersaglio` (guardata dall'indice della sfera sotto il
+//! mirino, colpita per l'istanza del lampo), quindi regge anche con più sfere.
 
 use serde::{Deserialize, Serialize};
 
 /// Quanto dura il lampo del bersaglio colpito, nel punto dove era.
 pub const LAMPO_MS: f64 = 120.0;
-
-/// Lo stato di un bersaglio, come lo legge lo shader.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StatoBersaglio {
-    Normale = 0,
-    /// Il mirino ci sta sopra.
-    Guardato = 1,
-    Colpito = 2,
-}
-
-impl StatoBersaglio {
-    pub fn valore(self) -> f32 {
-        self as u8 as f32
-    }
-}
-
-/// Lo stato della sfera che si mira.
-pub fn stato(guardato: bool) -> StatoBersaglio {
-    if guardato { StatoBersaglio::Guardato } else { StatoBersaglio::Normale }
-}
 
 /// Quanto è ancora visibile il lampo di un colpo dato `ms` fa: da 1 a 0, `None` quando è finito.
 pub fn lampo(ms_dal_colpo: f64) -> Option<f32> {
@@ -149,10 +130,7 @@ mod test {
     }
 
     #[test]
-    fn lo_stato_dice_guardato_e_il_lampo_finisce() {
-        assert_eq!(stato(true), StatoBersaglio::Guardato);
-        assert_eq!(stato(false), StatoBersaglio::Normale);
-        assert_eq!(StatoBersaglio::Colpito.valore(), 2.0);
+    fn il_lampo_finisce() {
         assert_eq!(lampo(0.0), Some(1.0));
         assert!(lampo(60.0).unwrap() > 0.4 && lampo(60.0).unwrap() < 0.6);
         assert_eq!(lampo(LAMPO_MS), None);

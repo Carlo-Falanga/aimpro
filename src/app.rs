@@ -24,22 +24,24 @@ use winit::monitor::{MonitorHandle, VideoModeHandle};
 use winit::window::{CursorGrabMode, Fullscreen, Window, WindowId};
 
 use crate::aggiornamento::{self, Aggiornamento};
+use crate::aspetto;
 use crate::banco::Banco;
 use crate::camera;
 use crate::config::{self, Config};
+use crate::esporta;
 use crate::giro::{Caso, Esito, Giro, Riepilogo};
-use crate::grafica::{Grafica, Scena, StratoEgui};
+use crate::grafica::{Grafica, MAX_SFERE, Scena, SferaGpu, Sfere, StratoEgui};
+use crate::home::{self, Home, InfoHome, Pagina};
 use crate::ingresso::{Clic, Ingresso};
 use crate::interfaccia::{self, Azione, InfoMenu};
 use crate::latenza::{CAMPIONI_PANNELLO, Latenza, testo_pannello};
 use crate::registro::Registro;
+use crate::scenari::{self, Parametri, Scenario};
 use crate::sensibilita::{Casuale, Variazione, fov_verticale, radianti_per_count, testo_variazione};
 use crate::sistema;
 use crate::storico::{self, Confronto, GiroSalvato, Ora, Storico};
 use crate::suoni::{Suoni, Suono};
 use crate::tempo;
-use crate::{aspetto, camera::colpisce_sfera};
-use crate::{esporta, giro};
 
 const OCCHIO: DVec3 = DVec3::new(0.0, 1.7, 0.0);
 /// I frame al secondo, al massimo, nel menu, in pausa e nel riepilogo.
@@ -48,6 +50,14 @@ const FPS_MENU: f64 = 60.0;
 const LATO_ATLANTE: usize = 2048;
 /// Il pannello della latenza nel giro si ricalcola 4 volte al secondo.
 const AGGIORNA_PANNELLO_MS: f64 = 250.0;
+/// Riprendi (in pausa) e Rigioca (nel riepilogo) non rispondono per questo tempo: un clic di troppo dal giro non li
+/// preme.
+pub const ATTESA_PULSANTI: Duration = Duration::from_millis(400);
+
+/// Quanto manca perché i pulsanti di una schermata comparsa a `entrata` rispondano (zero: rispondono).
+pub fn attesa_pulsanti(entrata: Option<Instant>, adesso: Instant) -> Duration {
+    entrata.map_or(Duration::ZERO, |e| ATTESA_PULSANTI.saturating_sub(adesso.saturating_duration_since(e)))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Stato {
@@ -55,7 +65,6 @@ pub enum Stato {
     Giro,
     Pausa,
     Riepilogo(Riepilogo),
-    Statistiche,
 }
 
 /// Lo strato egui disegnato sopra il giro (pannello della latenza), ricalcolato ogni tanto.
@@ -76,6 +85,21 @@ pub struct App {
     egui_stato: Option<egui_winit::State>,
     pub ingresso: Arc<Ingresso>,
     pub giro: Giro,
+    /// Gli scenari (quelli di aimpro e quelli della cartella dell'utente, letti all'avvio) e gli avvisi dei file
+    /// saltati.
+    pub scenari: Vec<Scenario>,
+    avvisi_scenari: Vec<String>,
+    /// L'indice in `scenari` dello scenario del giro in corso (o dell'ultimo).
+    scenario_giro: usize,
+    /// Dimensione e velocità dei bersagli del giro in corso (o dell'ultimo): quelle che si salvano con lui.
+    parametri_giro: Parametri,
+    /// Lo scenario mostrato nelle Statistiche.
+    scenario_statistiche: String,
+    /// Quando sono comparsi la pausa o il riepilogo: i loro pulsanti rispondono dopo `ATTESA_PULSANTI`.
+    entrata: Option<Instant>,
+    /// La home: pagina e filtri della libreria; la pagina del frame prima, per ridisegnare quando cambia.
+    pub home: Home,
+    home_pagina_prima: Pagina,
     /// Tempi, distanze e overshoot dei bersagli del giro: la memoria è preparata qui, nel frame non alloca.
     registro: Registro,
     /// I giri salvati; il giro finito si aggiunge e si scrive in `fine_giro`. Si leggono in un thread partito
@@ -111,8 +135,10 @@ pub struct App {
     col_banco: bool,
     /// Col banco, se i suoni sono accesi lo decide lui (`imposta_suoni_banco`).
     suoni_banco: bool,
-    /// L'ultimo bersaglio colpito: dove era, il raggio e quando (ms), per il lampo.
-    colpito: Option<(DVec3, f64, f64)>,
+    /// L'ultimo bersaglio colpito: il suo centro all'istante del colpo e quando (ms), per il lampo.
+    colpito: Option<(DVec3, f64)>,
+    /// Le comparse del giro già suonate (`Giro::comparse`).
+    comparse_suonate: u32,
     origine: i64,
     clic: [Clic; 256],
     pub pannello_visibile: bool,
@@ -169,7 +195,9 @@ impl App {
     pub fn new(banco: Option<Banco>, proxy: EventLoopProxy<()>) -> Self {
         let col_banco = banco.is_some();
         let percorso_config = config::percorso_predefinito();
-        let (config, avviso) = config::carica(&percorso_config);
+        let (mut config, avviso) = config::carica(&percorso_config);
+        // Il banco misura il menu di sempre, la home, anche su un PC dove aimpro non è mai partito.
+        config.primo_avvio_fatto |= banco.is_some();
         // Il banco non va in rete: niente che si mescoli alle sue misure. Il thread sveglia il menu con un evento.
         let aggiornamento = Aggiornamento::avvia(
             banco.is_none() && config.controlla_aggiornamenti,
@@ -183,6 +211,14 @@ impl App {
         let avvio = storico::istante_ms();
         // Il banco li accende solo nella sua fase coi suoni.
         let suoni = Suoni::avvia(banco.is_none() && config.suoni, config.volume);
+        // Il banco usa solo gli scenari di aimpro: le sue misure non dipendono dai file di chi gioca.
+        let (scenari, avvisi_scenari) = if banco.is_some() {
+            (scenari::di_aimpro(), Vec::new())
+        } else {
+            scenari::carica(&scenari::cartella_predefinita())
+        };
+        let regole = scenari[0].regole;
+        let scenario_statistiche = config.scenario.clone();
         let mut app = App {
             config,
             percorso_config,
@@ -192,10 +228,18 @@ impl App {
             egui_ctx,
             egui_stato: None,
             ingresso: Ingresso::avvia(),
-            giro: Giro::new(OCCHIO, Caso::new(tempo::qpc() as u64)),
+            giro: Giro::new(OCCHIO, Caso::new(tempo::qpc() as u64), regole),
+            scenari,
+            avvisi_scenari,
+            scenario_giro: 0,
+            parametri_giro: Parametri::STANDARD,
+            scenario_statistiche,
+            entrata: None,
+            home: Home::default(),
+            home_pagina_prima: Pagina::Gioca,
             registro: Registro::new(OCCHIO),
-            storico: None,
-            // Il banco non usa lo storico: niente lettura che si mescoli alle sue misure.
+            // Il banco non usa lo storico: niente lettura che si mescoli alle sue misure. La home ne ha uno vuoto.
+            storico: banco.is_some().then(|| Storico::vuoto(avvio)),
             storico_in_arrivo: banco
                 .is_none()
                 .then(|| std::thread::spawn(move || Storico::carica(storico::cartella_predefinita(), avvio))),
@@ -218,6 +262,7 @@ impl App {
             col_banco,
             suoni_banco: false,
             colpito: None,
+            comparse_suonate: 0,
             origine: tempo::qpc(),
             clic: [Clic::default(); 256],
             pannello_visibile: false,
@@ -346,6 +391,25 @@ impl App {
         self.applicati = (l.dx, l.dy);
     }
 
+    /// L'indice dello scenario scelto nel menu (lo scatto se l'id non c'è più).
+    fn indice_scenario(&self) -> usize {
+        self.scenari.iter().position(|s| s.id == self.config.scenario).unwrap_or(0)
+    }
+
+    pub fn scenario(&self) -> &Scenario {
+        &self.scenari[self.scenario_giro.min(self.scenari.len() - 1)]
+    }
+
+    /// Sceglie lo scenario (lo usa il banco); dice se c'è.
+    pub fn scegli_scenario(&mut self, id: &str) -> bool {
+        let c = self.scenari.iter().any(|s| s.id == id);
+        if c {
+            self.config.scenario = id.to_string();
+        }
+        c
+    }
+
+    /// Il giro parte col conto alla rovescia; `salta_conto` lo fa partire subito (spazio, o il banco).
     pub fn inizia_giro(&mut self) {
         self.salva_se_serve();
         self.ingresso.imposta_attivo(true);
@@ -353,18 +417,40 @@ impl App {
         self.scarta_clic();
         self.imbardata = 0.0;
         self.beccheggio = 0.0;
+        // Il giro nuovo si prepara qui, fuori dal frame: le sue sfere stanno in un vettore fisso, niente allocazioni.
+        self.scenario_giro = self.indice_scenario();
+        self.parametri_giro =
+            self.scenari[self.scenario_giro].regole.parametri_che_valgono(self.config.parametri());
+        let regole = self.scenari[self.scenario_giro].regole.con(self.parametri_giro);
+        self.giro = Giro::new(OCCHIO, Caso::new(tempo::qpc() as u64), regole);
         let v = self.variazione();
         let fattore = self.casuale.inizia(&v);
         self.imposta_fattore(fattore);
         self.sensibilita_usata = None;
         self.colpito = None;
+        self.comparse_suonate = 0;
         self.giro.inizia(self.ms(tempo::qpc()));
-        self.suoni.suona(Suono::Comparsa);
         self.registro.inizia(&self.giro, camera::avanti(self.imbardata, self.beccheggio));
         self.latenza.azzera();
         self.prossima_scadenza = 0;
         self.stato = Stato::Giro;
+        self.entrata = None;
         self.cursore_di_gioco(true);
+    }
+
+    /// R: il giro in corso (o in pausa) si butta senza salvarlo e ne parte uno nuovo dello stesso scenario; dal
+    /// riepilogo parte subito il prossimo. È un tasto voluto, non un clic di troppo: niente attesa dei pulsanti.
+    pub fn ricomincia(&mut self) {
+        if matches!(self.stato, Stato::Giro | Stato::Pausa | Stato::Riepilogo(_)) {
+            self.giro.annulla();
+            self.inizia_giro();
+        }
+    }
+
+    pub fn salta_conto(&mut self) {
+        if self.stato == Stato::Giro {
+            self.giro.salta_conto(self.ms(tempo::qpc()));
+        }
     }
 
     pub fn pausa(&mut self) {
@@ -374,12 +460,13 @@ impl App {
         self.ingresso.imposta_attivo(false);
         self.giro.pausa(self.ms(tempo::qpc()));
         self.stato = Stato::Pausa;
+        self.entrata = Some(Instant::now());
         self.cursore_di_gioco(false);
         self.ridisegna();
     }
 
     pub fn riprendi(&mut self) {
-        if self.stato != Stato::Pausa {
+        if self.stato != Stato::Pausa || !attesa_pulsanti(self.entrata, Instant::now()).is_zero() {
             return;
         }
         self.ingresso.imposta_attivo(true);
@@ -421,6 +508,7 @@ impl App {
         self.sensibilita_usata = testo_variazione(&self.casuale, self.config.gioco, self.config.sensibilita);
         self.salva_giro(&r);
         self.stato = Stato::Riepilogo(r);
+        self.entrata = Some(Instant::now());
         self.cursore_di_gioco(false);
         self.ridisegna();
     }
@@ -434,12 +522,14 @@ impl App {
             return;
         }
         let ora = Ora::adesso();
+        let id = self.scenario().id.clone();
         let g = GiroSalvato::nuovo(
-            storico::SCATTO,
-            giro::DURATA_GIRO_MS / 1000.0,
+            &id,
+            self.giro.durata_ms() / 1000.0,
             r,
             &self.registro,
             &self.config,
+            self.parametri_giro,
             ora,
             storico::istante_ms(),
         );
@@ -478,27 +568,71 @@ impl App {
         self.applicati = (dx, dy);
     }
 
+    /// Le sfere del giro per lo shader: i tratti di moto, non le posizioni (il centro lo calcola lo shader). `avanti` è
+    /// la visuale del frame: la sfera che guarda prende il colore "guardato".
+    fn sfere(&self, tempo_ms: f64, avanti: DVec3) -> Sfere {
+        let g = &self.giro;
+        let r = &g.regole;
+        let mut dati = [SferaGpu::default(); MAX_SFERE];
+        let n = g.n_sfere().min(MAX_SFERE);
+        for (i, d) in dati.iter_mut().enumerate().take(n) {
+            let m = g.tratto(i);
+            *d = SferaGpu {
+                moto: [m.imbardata as f32, m.beccheggio as f32, m.v_imbardata as f32, m.v_beccheggio as f32],
+                altro: [
+                    (m.t0 / 1000.0) as f32,
+                    r.raggio as f32,
+                    r.distanza as f32,
+                    (g.comparsa(i) / 1000.0) as f32,
+                ],
+            };
+        }
+        Sfere {
+            dati,
+            n: n as u32,
+            zona: [
+                -r.imbardata_max as f32,
+                r.imbardata_max as f32,
+                r.beccheggio_min as f32,
+                r.beccheggio_max as f32,
+            ],
+            tempo_s: (g.tempo_di_gioco(tempo_ms) / 1000.0) as f32,
+            guardata: g.guarda(avanti).map(|i| i as u32),
+            lampo: self
+                .colpito
+                .and_then(|(c, t)| aspetto::lampo(tempo_ms - t).map(|alfa| (self.sfera_ferma(c), alfa))),
+        }
+    }
+
+    /// Una sfera ferma col centro in `c`, per il lampo del colpo: gli angoli del centro visti dall'occhio, velocità 0.
+    fn sfera_ferma(&self, c: DVec3) -> SferaGpu {
+        let r = &self.giro.regole;
+        let v = (c - OCCHIO).normalize_or_zero();
+        let (imbardata, beccheggio) = (v.x.atan2(-v.z), v.y.clamp(-1.0, 1.0).asin());
+        SferaGpu {
+            moto: [imbardata as f32, beccheggio as f32, 0.0, 0.0],
+            altro: [0.0, r.raggio as f32, r.distanza as f32, 0.0],
+        }
+    }
+
     fn scena(&self, tempo_ms: f64, nel_giro: bool) -> Scena {
         let proporzione = self.grafica.as_ref().map_or(16.0 / 9.0, Grafica::proporzione);
         let avanti = camera::avanti(self.imbardata, self.beccheggio);
         let destra = camera::destra(self.imbardata);
         let restante = self.giro.restante_ms(tempo_ms);
-        let guardato = nel_giro && colpisce_sfera(OCCHIO, avanti, self.giro.bersaglio, self.giro.raggio());
-        let lampo = self
-            .colpito
-            .filter(|_| nel_giro)
-            .and_then(|(c, r, t)| aspetto::lampo(tempo_ms - t).map(|a| (c, r, a)));
+        // In pausa il conto alla rovescia non si vede: sopra c'è il riquadro della pausa.
+        let conto = if nel_giro && self.stato == Stato::Giro { self.giro.conto(tempo_ms) } else { None };
         Scena {
             vp: camera::vista_proiezione(OCCHIO, self.imbardata, self.beccheggio, self.fov_y, proporzione),
             occhio: OCCHIO,
             destra,
             su: destra.cross(avanti),
-            sfera: nel_giro.then(|| (self.giro.bersaglio, self.giro.raggio())),
-            stato_sfera: aspetto::stato(guardato).valore(),
-            lampo,
-            tempo: nel_giro.then(|| {
-                ((restante / 1000.0).ceil() as u32, (restante / crate::giro::DURATA_GIRO_MS) as f32)
-            }),
+            // Durante il conto alla rovescia le sfere non si vedono: compaiono quando il giro parte.
+            sfere: (nel_giro && self.giro.conto(tempo_ms).is_none()).then(|| self.sfere(tempo_ms, avanti)),
+            tempo: nel_giro
+                .then(|| ((restante / 1000.0).ceil() as u32, (restante / self.giro.durata_ms()) as f32)),
+            conto,
+            dal_vivo: (nel_giro && self.config.punteggio_dal_vivo).then(|| self.giro.dal_vivo(tempo_ms)),
         }
     }
 
@@ -530,8 +664,9 @@ impl App {
         // La sensibilità a caso "ogni N secondi" cambia sui secondi di gioco (la pausa non conta).
         if self.casuale.attiva() {
             let v = self.config.variazione;
-            let giocati = (giro::DURATA_GIRO_MS - self.giro.restante_ms(self.ms(letto))) / 1000.0;
-            if let Some(f) = self.casuale.aggiorna(&v, giocati, giro::DURATA_GIRO_MS / 1000.0) {
+            let durata = self.giro.durata_ms();
+            let giocati = (durata - self.giro.restante_ms(self.ms(letto))) / 1000.0;
+            if let Some(f) = self.casuale.aggiorna(&v, giocati, durata / 1000.0) {
                 self.imposta_fattore(f);
             }
         }
@@ -540,27 +675,37 @@ impl App {
             let c = self.clic[i];
             self.applica(c.dx, c.dy);
             let d = camera::avanti(self.imbardata, self.beccheggio);
-            let (prima, t) = (self.giro.bersaglio, self.ms(c.qpc));
-            let esito = self.giro.clic(t, d);
-            self.registro.clic(&self.giro, esito, d);
-            // I suoni: un contatore atomico per il thread audio, niente attese.
-            match esito {
-                Esito::Colpo => {
-                    self.suoni.suona(Suono::Colpo);
-                    self.suoni.suona(Suono::Comparsa);
-                    self.colpito = Some((prima, self.giro.raggio(), t));
+            let t = self.ms(c.qpc);
+            let esito = self.giro.tasto(t, c.giu, d);
+            if c.giu {
+                self.registro.clic(&self.giro, esito, d);
+                // I suoni: un contatore atomico per il thread audio, niente attese.
+                match esito {
+                    Esito::Colpo => {
+                        self.suoni.suona(Suono::Colpo);
+                        self.colpito = Some((self.giro.colpita(), t));
+                    }
+                    Esito::Errore => self.suoni.suona(Suono::Errore),
+                    Esito::Ignorato => {}
                 }
-                Esito::Errore => self.suoni.suona(Suono::Errore),
-                Esito::Ignorato => {}
             }
             if primo_clic == 0 && esito != Esito::Ignorato {
                 primo_clic = c.qpc;
             }
         }
         self.applica(lettura.dx, lettura.dy);
-        self.registro.osserva(&self.giro, camera::avanti(self.imbardata, self.beccheggio));
-
         let adesso = self.ms(letto);
+        let d = camera::avanti(self.imbardata, self.beccheggio);
+        // Le sfere all'istante della lettura, poi il tracking fino a lì con la visuale appena letta.
+        self.giro.avanza(adesso);
+        // Il suono di comparsa quando una sfera si vede davvero: dopo il conto alla rovescia, dopo l'attesa degli
+        // scenari di reazione, o subito dopo un colpo.
+        if self.giro.comparse() != self.comparse_suonate {
+            self.comparse_suonate = self.giro.comparse();
+            self.suoni.suona(Suono::Comparsa);
+        }
+        self.giro.traccia(adesso, d);
+        self.registro.osserva(&self.giro, d);
         let finito = self.giro.aggiorna(adesso);
         let scena = self.scena(adesso, true);
         let strato = self.pannello.as_ref().filter(|_| self.pannello_visibile).map(|p| StratoEgui {
@@ -653,10 +798,15 @@ impl App {
         let (confronto, avviso_storico, esportato) =
             (self.confronto, self.avviso_storico.clone(), self.esportato.clone());
         let sensibilita_usata = self.sensibilita_usata.clone();
-        if stato_ora == Stato::Statistiche {
-            self.storico();
+        if stato_ora == Stato::Menu {
+            // Le statistiche aspettano lo storico; le altre pagine lo usano appena il thread ha finito.
+            let pronto = self.storico_in_arrivo.as_ref().is_none_or(|t| t.is_finished());
+            if self.home.pagina == Pagina::Statistiche || pronto {
+                self.storico();
+            }
         }
         let storico = self.storico.as_ref();
+        let mut home = std::mem::take(&mut self.home);
         // Fuori dal giro le misure non cambiano: il testo si ricalcola solo se ci sono frame nuovi.
         let pannello = if self.pannello_visibile {
             let n = self.latenza.versione();
@@ -670,32 +820,50 @@ impl App {
             None
         };
         let stato_aggiornamento = self.aggiornamento.stato();
+        let attesa = attesa_pulsanti(self.entrata, Instant::now());
+        let scenari = &self.scenari;
+        let scenario = &self.scenari[self.scenario_giro.min(self.scenari.len() - 1)];
+        let mut scelta_statistiche = self.scenario_statistiche.clone();
+
         let mut azione = Azione::Nessuna;
         let mut uscita = self.egui_ctx.run_ui(input, |ui| {
             azione = match stato_ora {
-                Stato::Menu => interfaccia::menu(
+                Stato::Menu if !cfg.primo_avvio_fatto => home::benvenuto(ui, &mut cfg),
+                Stato::Menu => home::home(
                     ui,
+                    &mut home,
                     &mut cfg,
-                    &InfoMenu {
-                        scheda: &scheda,
-                        presentazione: &presentazione,
-                        avviso: avviso.as_deref(),
-                        build: self.aggiornamento.attuale(),
-                        aggiornamento: &stato_aggiornamento,
-                        hz_schermo: interfaccia::hz_intero(self.hz_schermo),
-                        audio_guasto: self.suoni.guasto.load(std::sync::atomic::Ordering::Acquire),
+                    &mut scelta_statistiche,
+                    &InfoHome {
+                        menu: InfoMenu {
+                            scheda: &scheda,
+                            presentazione: &presentazione,
+                            avviso: avviso.as_deref(),
+                            build: self.aggiornamento.attuale(),
+                            aggiornamento: &stato_aggiornamento,
+                            hz_schermo: interfaccia::hz_intero(self.hz_schermo),
+                            audio_guasto: self.suoni.guasto.load(std::sync::atomic::Ordering::Acquire),
+                            scenari,
+                            avvisi_scenari: &self.avvisi_scenari,
+                        },
+                        storico,
+                        esportato: esportato.as_deref(),
                     },
                 ),
-                Stato::Pausa => interfaccia::pausa(ui, restanti),
+                Stato::Pausa => interfaccia::pausa(ui, restanti, attesa),
                 Stato::Riepilogo(r) => interfaccia::riepilogo(
                     ui,
                     &r,
-                    confronto.as_ref(),
-                    avviso_storico.as_deref(),
-                    sensibilita_usata.as_deref(),
+                    &interfaccia::InfoRiepilogo {
+                        scenario,
+                        // I parametri del giro appena finito: quelli salvati con lui.
+                        parametri: self.parametri_giro,
+                        confronto: confronto.as_ref(),
+                        avviso: avviso_storico.as_deref(),
+                        sensibilita_usata: sensibilita_usata.as_deref(),
+                        attesa,
+                    },
                 ),
-                Stato::Statistiche => storico
-                    .map_or(Azione::TornaAlMenu, |s| interfaccia::statistiche(ui, s, esportato.as_deref())),
                 Stato::Giro => Azione::Nessuna,
             };
             if let Some(t) = &pannello {
@@ -738,8 +906,24 @@ impl App {
         // Il pannello del giro va ricalcolato: le texture di egui possono essere cambiate.
         self.pannello = None;
 
+        if home.pagina != self.home_pagina_prima {
+            // Una pagina nuova si disegna dall'alto e con i suoi dati (lo storico) già pronti.
+            self.home_pagina_prima = home.pagina.clone();
+            self.ridisegna();
+        }
+        self.home = home;
         if cfg != self.config {
+            // Ogni cambio dalle pagine (scenario scelto, preferiti, impostazioni) si salva.
             self.config = cfg;
+            if azione == Azione::Nessuna {
+                azione = Azione::Impostazioni;
+            } else {
+                self.da_salvare = true;
+            }
+        }
+        if scelta_statistiche != self.scenario_statistiche {
+            self.scenario_statistiche = scelta_statistiche;
+            self.ridisegna();
         }
         self.esegui(azione);
         // Si scrive il file solo a mouse rilasciato: trascinare un valore cambia le impostazioni a ogni frame.
@@ -758,14 +942,26 @@ impl App {
                 self.testo_pannello_menu = None;
                 self.ridisegna();
             }
-            Azione::Inizia => self.inizia_giro(),
+            Azione::Inizia => {
+                // Rigioca dal riepilogo risponde solo dopo l'attesa (il pulsante è spento, qui si ricontrolla).
+                if !(matches!(self.stato, Stato::Riepilogo(_))
+                    && !attesa_pulsanti(self.entrata, Instant::now()).is_zero())
+                {
+                    self.inizia_giro();
+                }
+            }
             Azione::Riprendi => self.riprendi(),
             Azione::EsciDalGiro | Azione::TornaAlMenu => self.torna_al_menu(),
             Azione::Statistiche => {
                 self.salva_se_serve();
+                // Le statistiche aprono sullo scenario del giro appena fatto, o su quello scelto nel menu.
+                self.scenario_statistiche = match self.stato {
+                    Stato::Riepilogo(_) => self.scenario().id.clone(),
+                    _ => self.config.scenario.clone(),
+                };
                 self.torna_al_menu();
                 self.esportato = None;
-                self.stato = Stato::Statistiche;
+                self.home.pagina = Pagina::Statistiche;
             }
             Azione::ProvaSuono => {
                 // Anche a fine trascinamento del volume: il valore nuovo si applica e si salva.
@@ -944,12 +1140,15 @@ impl ApplicationHandler for App {
                 if event.state == ElementState::Pressed && !event.repeat =>
             {
                 match event.physical_key {
+                    // Lo spazio salta il conto alla rovescia.
+                    PhysicalKey::Code(KeyCode::Space) if self.stato == Stato::Giro => self.salta_conto(),
                     PhysicalKey::Code(KeyCode::Escape) => match self.stato {
                         Stato::Giro => self.pausa(),
                         Stato::Pausa => self.riprendi(),
-                        Stato::Statistiche => self.torna_al_menu(),
                         _ => {}
                     },
+                    // R ricomincia lo stesso scenario da capo, dal giro, dalla pausa o dal riepilogo.
+                    PhysicalKey::Code(KeyCode::KeyR) => self.ricomincia(),
                     PhysicalKey::Code(KeyCode::F3) => {
                         self.pannello_visibile = !self.pannello_visibile;
                         self.pannello = None;

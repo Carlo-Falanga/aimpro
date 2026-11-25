@@ -1,0 +1,26 @@
+# Flick su bersagli che cambiano direzione.
+formato = 1
+id = "scarto"
+nome = "Scarto"
+categoria = "movimento"
+difficolta = "media"
+descrizione = "Una sfera alla volta che cambia direzione a caso: il clic va dato al momento giusto."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 1
+raggio = 0.4
+distanza = 12.0
+distanza_minima_gradi = 10.0
+
+[zona]
+imbardata_gradi = 40.0
+beccheggio_min_gradi = -10.0
+beccheggio_max_gradi = 20.0
+
+[movimento]
+tipo = "casuale"
+velocita_gradi_s = 14.0
+cambio_min_ms = 400
+cambio_max_ms = 900

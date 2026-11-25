@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::aspetto::{ColoriBersaglio, Tema};
 use crate::mirino::Mirino;
+use crate::scenari::Parametri;
 use crate::sensibilita::{Gioco, Variazione};
 
 pub const LIMITI_FOV: (f64, f64) = (50.0, 140.0);
@@ -48,6 +49,18 @@ pub struct Config {
     pub suoni: bool,
     /// Da 0 a 100.
     pub volume: f64,
+    /// L'id dello scenario scelto nel menu (un file vecchio senza il campo prende lo scatto).
+    pub scenario: String,
+    /// Dimensione e velocità dei bersagli, 1 = come dice lo scenario (fra 0,5 e 2).
+    pub dimensione: f64,
+    pub velocita: f64,
+    /// Gli id degli scenari preferiti, nell'ordine in cui sono stati aggiunti.
+    pub preferiti: Vec<String>,
+    /// Punteggio e precisione dal vivo nel giro, in alto a sinistra.
+    pub punteggio_dal_vivo: bool,
+    /// La pagina del primo avvio (gioco, sensibilità, DPI) è già stata vista. Un file di prima senza il campo l'ha
+    /// già vista: chi aveva le impostazioni le ha già scelte.
+    pub primo_avvio_fatto: bool,
 }
 
 impl Default for Config {
@@ -89,7 +102,30 @@ impl Config {
             tema: Tema::Grafite,
             suoni: true,
             volume: 50.0,
+            scenario: crate::storico::SCATTO.to_string(),
+            dimensione: 1.0,
+            velocita: 1.0,
+            preferiti: Vec::new(),
+            punteggio_dal_vivo: true,
+            primo_avvio_fatto: false,
         }
+    }
+
+    pub fn preferito(&self, id: &str) -> bool {
+        self.preferiti.iter().any(|p| p == id)
+    }
+
+    /// Aggiunge o toglie lo scenario dai preferiti.
+    pub fn cambia_preferito(&mut self, id: &str) {
+        if self.preferito(id) {
+            self.preferiti.retain(|p| p != id);
+        } else {
+            self.preferiti.push(id.to_string());
+        }
+    }
+
+    pub fn parametri(&self) -> Parametri {
+        Parametri { dimensione: self.dimensione, velocita: self.velocita }
     }
 
     /// Riporta ogni valore fuori dai limiti al predefinito del gioco.
@@ -115,6 +151,19 @@ impl Config {
         if self.limite_fps != 0 && !(LIMITI_FPS.0..=LIMITI_FPS.1).contains(&self.limite_fps) {
             self.limite_fps = 0;
         }
+        let p = self.parametri().normalizzati();
+        (self.dimensione, self.velocita) = (p.dimensione, p.velocita);
+        if self.scenario.trim().is_empty() {
+            self.scenario = crate::storico::SCATTO.to_string();
+        }
+        let mut visti = Vec::new();
+        self.preferiti.retain(|p| {
+            !p.is_empty() && !visti.contains(p) && {
+                visti.push(p.clone());
+                true
+            }
+        });
+        self.preferiti.truncate(200);
         self
     }
 }
@@ -143,6 +192,9 @@ fn con_predefiniti_del_gioco(mut c: Config, testo: &str) -> Config {
     if !tabella.contains_key("fov") || sconosciuto {
         c.fov = p.fov;
     }
+    if !tabella.contains_key("primo_avvio_fatto") {
+        c.primo_avvio_fatto = true;
+    }
     c
 }
 
@@ -151,11 +203,16 @@ pub fn carica(percorso: &Path) -> (Config, Option<String>) {
     match std::fs::read_to_string(percorso) {
         Ok(testo) => match toml::from_str::<Config>(&testo) {
             Ok(c) => (con_predefiniti_del_gioco(c, &testo).normalizzata(), None),
-            Err(e) => (Config::default(), Some(format!("impostazioni illeggibili, uso i predefiniti: {e}"))),
+            Err(e) => (gia_avviato(), Some(format!("impostazioni illeggibili, uso i predefiniti: {e}"))),
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Config::default(), None),
-        Err(e) => (Config::default(), Some(format!("impostazioni non lette: {e}"))),
+        Err(e) => (gia_avviato(), Some(format!("impostazioni non lette: {e}"))),
     }
+}
+
+/// I predefiniti per chi ha già un file che non si legge: non è il primo avvio, e l'avviso deve vedersi nella home.
+fn gia_avviato() -> Config {
+    Config { primo_avvio_fatto: true, ..Config::default() }
 }
 
 /// Scrive le impostazioni: prima in un file accanto, poi lo rinomina, così un'interruzione non lascia il file
@@ -211,6 +268,12 @@ mod test {
             tema: Tema::Sabbia,
             suoni: false,
             volume: 35.0,
+            scenario: "terna".to_string(),
+            dimensione: 1.25,
+            velocita: 0.75,
+            preferiti: vec!["filo".to_string(), "terna".to_string()],
+            punteggio_dal_vivo: false,
+            primo_avvio_fatto: true,
         };
         salva(&p, &c).unwrap();
         assert_eq!(carica(&p), (c, None));
@@ -294,6 +357,7 @@ controlla_aggiornamenti = false
         let (c, errore) = carica(&p);
         assert_eq!(c, Config::predefinita(Gioco::Cs2));
         assert!(errore.is_none());
+        assert!(!c.primo_avvio_fatto, "senza file è il primo avvio");
         assert_eq!(c.fov, 90.0);
         assert!(!c.vsync, "vsync spento di base");
     }
@@ -305,7 +369,11 @@ controlla_aggiornamenti = false
         let p = d.join("config.toml");
         std::fs::write(&p, "gioco = [non toml").unwrap();
         let (c, errore) = carica(&p);
-        assert_eq!(c, Config::default());
+        assert_eq!(
+            c,
+            Config { primo_avvio_fatto: true, ..Config::default() },
+            "predefiniti, senza il primo avvio"
+        );
         assert!(errore.is_some());
     }
 
@@ -318,6 +386,14 @@ controlla_aggiornamenti = false
             dpi: 0.0,
             vsync: false,
             limite_fps: 5,
+            schermo_intero_esclusivo: true,
+            controlla_aggiornamenti: true,
+            scenario: String::new(),
+            dimensione: 7.0,
+            velocita: -1.0,
+            preferiti: vec!["a".into(), "".into(), "a".into(), "b".into()],
+            punteggio_dal_vivo: true,
+            primo_avvio_fatto: false,
             moltiplicatore_y: 50.0,
             volume: -4.0,
             ..Config::default()
@@ -325,6 +401,8 @@ controlla_aggiornamenti = false
         .normalizzata();
         assert_eq!(c.moltiplicatore_y, 1.0);
         assert_eq!(c.volume, 50.0);
+        assert_eq!((c.scenario.as_str(), c.dimensione, c.velocita), ("scatto", 2.0, 0.5));
+        assert_eq!(c.preferiti, ["a", "b"], "niente doppi né vuoti");
         assert_eq!(c.sensibilita, 0.4);
         assert_eq!(c.fov, 103.0);
         assert_eq!(c.dpi, 800.0);
@@ -371,6 +449,9 @@ schermo_intero_esclusivo = true
         assert_eq!(avviso, None);
         assert!(c.controlla_aggiornamenti);
         assert!(Config::default().controlla_aggiornamenti, "acceso di base");
+        assert_eq!((c.scenario.as_str(), c.dimensione, c.velocita), ("scatto", 1.0, 1.0), "scenari standard");
+        assert!(c.primo_avvio_fatto, "chi aveva già le impostazioni non rivede il primo avvio");
+        assert!(c.punteggio_dal_vivo && c.preferiti.is_empty());
         std::fs::write(
             &p,
             "controlla_aggiornamenti = false

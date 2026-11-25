@@ -1,0 +1,25 @@
+# Reazione su una zona larga.
+formato = 1
+id = "sentinella"
+nome = "Sentinella"
+categoria = "precisione"
+difficolta = "difficile"
+descrizione = "Attese più lunghe e sfere più piccole in tutta la zona: resta pronto."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 1
+raggio = 0.3
+distanza = 12.0
+distanza_minima_gradi = 12.0
+ritardo_min_ms = 600
+ritardo_max_ms = 2200
+
+[zona]
+imbardata_gradi = 45.0
+beccheggio_min_gradi = -10.0
+beccheggio_max_gradi = 20.0
+
+[movimento]
+tipo = "fermo"
