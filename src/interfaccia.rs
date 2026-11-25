@@ -1,18 +1,19 @@
-//! I pannelli con egui: menu con le impostazioni, pausa, riepilogo, statistiche, pannello della latenza.
+//! I pannelli con egui: menu con le impostazioni, pausa, riepilogo, pannello della latenza (le statistiche stanno in
+//! `schermata_statistiche.rs`).
 //! egui gira solo fuori dal giro (e, nel giro, solo per il pannello della latenza quando è aperto, 4 volte al
 //! secondo): nel giro il frame non passa da egui.
 
-use egui::{Align2, Color32, CornerRadius, FontId, Frame, Margin, Pos2, RichText, Sense, Shape, Stroke, Ui};
+use egui::{Align2, Color32, CornerRadius, Frame, Margin, RichText, Stroke, Ui};
 
 use crate::aggiornamento::Stato as StatoAggiornamento;
 use crate::config::{Config, LIMITI_DPI, LIMITI_FOV, LIMITI_FPS, LIMITI_SENSIBILITA};
 use crate::giro::Riepilogo;
 use crate::sensibilita::{Gioco, cm_per_360, converti, gradi_per_count};
-use crate::storico::{Confronto, GiroSalvato, SCATTO, Storico};
+use crate::storico::Confronto;
 
 pub const ACCENTO: Color32 = Color32::from_rgb(255, 176, 33);
-const TENUE: Color32 = Color32::from_rgb(161, 163, 169);
-const AVVISO: Color32 = Color32::from_rgb(255, 210, 122);
+pub const TENUE: Color32 = Color32::from_rgb(161, 163, 169);
+pub const AVVISO: Color32 = Color32::from_rgb(255, 210, 122);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Azione {
@@ -22,7 +23,6 @@ pub enum Azione {
     EsciDalGiro,
     TornaAlMenu,
     Statistiche,
-    EsportaCsv,
     /// "Aggiorna e riavvia" (o "Riprova" dopo un errore).
     Aggiorna,
     /// Le impostazioni sono cambiate: si salvano e si applicano.
@@ -229,7 +229,7 @@ fn scheda(ui: &mut Ui, nome: &str, contenuto: impl FnOnce(&mut Ui) -> Azione) ->
 /// Un riquadro centrato. `nome` gli dà un id suo: egui centra l'area con la misura che aveva nel frame prima, e con
 /// un id in comune il primo frame di un riquadro prenderebbe la misura di un altro (la pausa usciva più in alto,
 /// con l'altezza del riepilogo).
-fn scheda_larga(
+pub fn scheda_larga(
     ui: &mut Ui,
     nome: &str,
     larghezza: f32,
@@ -265,7 +265,7 @@ fn scheda_larga(
     azione
 }
 
-fn pulsante(ui: &mut Ui, testo: &str, principale: bool) -> bool {
+pub fn pulsante(ui: &mut Ui, testo: &str, principale: bool) -> bool {
     let t = RichText::new(testo).size(16.0).strong();
     let b = if principale {
         egui::Button::new(t.color(Color32::from_rgb(23, 19, 10))).fill(ACCENTO)
@@ -513,201 +513,6 @@ pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, confronto: Option<&Confronto>, avvi
     })
 }
 
-/// Giri mostrati nel grafico.
-pub const GIRI_NEL_GRAFICO: usize = 30;
-
-/// Il valore in cima al grafico: un po' sopra il più alto fra giri e record, arrotondato a 5.
-pub fn cima_grafico(colpi: &[u32], record: u32) -> u32 {
-    let massimo = colpi.iter().copied().max().unwrap_or(0).max(record);
-    (massimo + massimo / 10 + 1).div_ceil(5).max(1) * 5
-}
-
-fn grafico(ui: &mut Ui, giri: &[&GiroSalvato], record: u32) {
-    let colpi: Vec<u32> = giri.iter().map(|g| g.colpi).collect();
-    let cima = cima_grafico(&colpi, record) as f32;
-    let (area, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 170.0), Sense::hover());
-    let p = ui.painter_at(area);
-    p.rect_filled(area, CornerRadius::same(8), Color32::from_white_alpha(6));
-    // Spazio a sinistra per i valori dell'asse.
-    let dentro =
-        egui::Rect::from_min_max(area.min + egui::vec2(36.0, 14.0), area.max - egui::vec2(14.0, 14.0));
-    let y = |v: f32| dentro.bottom() - v / cima * dentro.height();
-    let font = FontId::proportional(12.0);
-    for v in [0.0, cima / 2.0, cima] {
-        p.line_segment(
-            [Pos2::new(dentro.left(), y(v)), Pos2::new(dentro.right(), y(v))],
-            Stroke::new(1.0, Color32::from_white_alpha(14)),
-        );
-        p.text(
-            Pos2::new(dentro.left() - 8.0, y(v)),
-            Align2::RIGHT_CENTER,
-            format!("{v:.0}"),
-            font.clone(),
-            TENUE,
-        );
-    }
-    let chiaro = Color32::from_rgb(216, 217, 220);
-    let yr = y(record as f32);
-    p.extend(Shape::dashed_line(
-        &[Pos2::new(dentro.left(), yr), Pos2::new(dentro.right(), yr)],
-        Stroke::new(1.5, chiaro),
-        6.0,
-        4.0,
-    ));
-    p.text(
-        Pos2::new(dentro.right(), yr - 4.0),
-        Align2::RIGHT_BOTTOM,
-        format!("record {record}"),
-        font,
-        chiaro,
-    );
-    // Con pochi giri i punti si allargano su tutto il grafico, il più recente sempre a destra.
-    let passo = dentro.width() / colpi.len().saturating_sub(1).max(1) as f32;
-    let ultimo = colpi.len().saturating_sub(1);
-    let punti: Vec<Pos2> = colpi
-        .iter()
-        .enumerate()
-        .map(|(i, &c)| Pos2::new(dentro.right() - passo * (ultimo - i) as f32, y(c as f32)))
-        .collect();
-    if punti.len() > 1 {
-        p.add(Shape::line(punti.clone(), Stroke::new(2.0, ACCENTO)));
-    }
-    for q in punti {
-        p.circle_filled(q, 3.5, ACCENTO);
-    }
-}
-
-fn percentuale(p: Option<f64>) -> String {
-    p.map_or("-".to_string(), |p| format!("{:.1}%", p * 100.0))
-}
-
-fn millisecondi(t: Option<f64>) -> String {
-    t.map_or("-".to_string(), |t| format!("{t:.0} ms"))
-}
-
-/// Colonne dell'elenco dei giri: titolo e larghezza.
-const COLONNE: [(&str, f32); 7] = [
-    ("Data", 150.0),
-    ("Colpi", 60.0),
-    ("Errori", 60.0),
-    ("Precisione", 90.0),
-    ("Tempo medio", 100.0),
-    ("Overshoot", 85.0),
-    ("Sensibilità", 130.0),
-];
-
-fn riga(ui: &mut Ui, celle: [String; 7], intestazione: bool) {
-    ui.horizontal(|ui| {
-        for ((_, w), testo) in COLONNE.iter().zip(celle) {
-            let t = RichText::new(testo).size(13.0);
-            let t = if intestazione { t.color(TENUE) } else { t };
-            ui.add_sized([*w, 18.0], egui::Label::new(t).truncate());
-        }
-    });
-}
-
-/// La schermata Statistiche dello scenario scatto: grafico degli ultimi giri con il record, la sessione e l'elenco.
-pub fn statistiche(ui: &mut Ui, s: &Storico, esportato: Option<&str>) -> Azione {
-    scheda_larga(ui, "statistiche", 760.0, |ui| {
-        let mut azione = Azione::Nessuna;
-        ui.label(RichText::new("Statistiche").size(26.0).strong());
-        ui.label(RichText::new("Scatto, 30 secondi").color(TENUE));
-        let giri: Vec<&GiroSalvato> = s.giri_di(SCATTO).collect();
-        if giri.is_empty() {
-            ui.add_space(6.0);
-            ui.label("Nessun giro salvato. Gioca uno scatto: ogni giro finito compare qui, con il record e l'andamento.");
-        } else {
-            let record = s.record(SCATTO).unwrap_or(0);
-            let sessione = s.sessione(SCATTO);
-            ui.add_space(4.0);
-            let inizio = giri.len().saturating_sub(GIRI_NEL_GRAFICO);
-            let n = giri.len() - inizio;
-            ui.label(
-                RichText::new(if n == 1 {
-                    "Colpi dell'ultimo giro, con la linea del record".to_string()
-                } else {
-                    format!("Colpi degli ultimi {n} giri, con la linea del record")
-                })
-                .size(13.0)
-                .color(TENUE),
-            );
-            grafico(ui, &giri[inizio..], record);
-            ui.add_space(2.0);
-            egui::Grid::new("sessione").num_columns(2).spacing([40.0, 8.0]).show(ui, |ui| {
-                ui.label("Record");
-                ui.label(RichText::new(format!("{record} colpi")).strong());
-                ui.end_row();
-                ui.label("Da quando hai aperto aimpro");
-                let testo = match (sessione.media_colpi, sessione.migliore) {
-                    (Some(m), Some(b)) => format!(
-                        "{} {}, media {m:.1} colpi, migliore {b}",
-                        sessione.giri,
-                        if sessione.giri == 1 { "giro" } else { "giri" }
-                    ),
-                    _ => "nessun giro".to_string(),
-                };
-                ui.label(RichText::new(testo).strong());
-                ui.end_row();
-                ui.label("Giri salvati");
-                ui.label(RichText::new(giri.len().to_string()).strong());
-                ui.end_row();
-            });
-            ui.separator();
-            riga(ui, COLONNE.map(|(t, _)| t.to_string()), true);
-            egui::ScrollArea::vertical().max_height(200.0).auto_shrink([false, true]).show_rows(
-                ui,
-                18.0,
-                giri.len(),
-                |ui, righe| {
-                    for i in righe {
-                        // Il più recente in alto.
-                        let g = giri[giri.len() - 1 - i];
-                        riga(
-                            ui,
-                            [
-                                g.data.clone(),
-                                g.colpi.to_string(),
-                                g.errori.to_string(),
-                                percentuale(g.precisione),
-                                millisecondi(g.tempo_medio_ms),
-                                g.overshoot.to_string(),
-                                format!("{} {}", g.impostazioni.gioco.nome(), g.impostazioni.sensibilita),
-                            ],
-                            false,
-                        );
-                    }
-                },
-            );
-        }
-        if s.saltati > 0 {
-            ui.label(
-                RichText::new(format!(
-                    "{} file dello storico non si leggono e sono stati saltati.",
-                    s.saltati
-                ))
-                .color(TENUE)
-                .size(12.0),
-            );
-        }
-        if let Some(e) = esportato {
-            ui.label(RichText::new(e).size(13.0));
-        }
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            let w = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
-            let esporta = egui::Button::new(RichText::new("Esporta CSV").size(16.0).strong());
-            if ui.add_enabled_ui(!giri.is_empty(), |ui| ui.add_sized([w, 38.0], esporta)).inner.clicked() {
-                azione = Azione::EsportaCsv;
-            }
-            let torna = egui::Button::new(RichText::new("Torna al menu").size(16.0).strong());
-            if ui.add_sized([w, 38.0], torna).clicked() {
-                azione = Azione::TornaAlMenu;
-            }
-        });
-        azione
-    })
-}
-
 pub fn pannello_latenza(ui: &mut Ui, testo: &str) {
     egui::Area::new(egui::Id::unique("latenza")).anchor(Align2::RIGHT_TOP, [-12.0, 12.0]).show(
         ui.ctx(),
@@ -797,13 +602,5 @@ mod test {
         assert_eq!(hz_intero(239.96), 240);
         assert_eq!(hz_intero(59.94), 60);
         assert_eq!(hz_intero(0.0), 0);
-    }
-
-    #[test]
-    fn il_grafico_ha_spazio_sopra_il_massimo() {
-        assert_eq!(cima_grafico(&[], 0), 5);
-        assert_eq!(cima_grafico(&[10, 20], 18), 25);
-        assert_eq!(cima_grafico(&[10, 20], 40), 45);
-        assert!(cima_grafico(&[44], 0) > 44);
     }
 }

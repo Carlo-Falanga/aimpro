@@ -27,17 +27,19 @@ use crate::aggiornamento::{self, Aggiornamento};
 use crate::banco::Banco;
 use crate::camera;
 use crate::config::{self, Config};
+use crate::giro;
 use crate::giro::{Caso, Esito, Giro, Riepilogo};
 use crate::grafica::{Grafica, Scena, StratoEgui};
 use crate::ingresso::{Clic, Ingresso};
 use crate::interfaccia::{self, Azione, InfoMenu};
 use crate::latenza::{CAMPIONI_PANNELLO, Latenza, testo_pannello};
 use crate::registro::Registro;
+use crate::schermata_statistiche::{self, Vista};
 use crate::sensibilita::{fov_verticale, radianti_per_count};
 use crate::sistema;
+use crate::statistiche::{Sintesi, Statistiche};
 use crate::storico::{self, Confronto, GiroSalvato, Ora, Storico};
 use crate::tempo;
-use crate::{esporta, giro};
 
 const OCCHIO: DVec3 = DVec3::new(0.0, 1.7, 0.0);
 /// I frame al secondo, al massimo, nel menu, in pausa e nel riepilogo.
@@ -79,14 +81,16 @@ pub struct App {
     /// I giri salvati; il giro finito si aggiunge e si scrive in `fine_giro`. Si leggono in un thread partito
     /// all'avvio (`storico_in_arrivo`), così con migliaia di file la finestra non aspetta: vedi `storico()`.
     storico: Option<Storico>,
-    storico_in_arrivo: Option<std::thread::JoinHandle<Storico>>,
+    /// La sintesi di ogni giro per la schermata Statistiche, letta insieme allo storico.
+    statistiche: Statistiche,
+    storico_in_arrivo: Option<std::thread::JoinHandle<(Storico, Statistiche)>>,
+    /// Cosa si guarda nella schermata Statistiche.
+    vista: Vista,
     /// Quando è partito aimpro: i giri da qui in poi sono la sessione.
     avvio_ms: i64,
     /// L'ultimo giro rispetto al record di prima (nel riepilogo); `None` col banco, che non salva i giri.
     confronto: Option<Confronto>,
     avviso_storico: Option<String>,
-    /// L'esito dell'ultimo "Esporta CSV", mostrato nella schermata Statistiche.
-    esportato: Option<String>,
     pub latenza: Latenza,
     pub stato: Stato,
     imbardata: f64,
@@ -173,14 +177,13 @@ impl App {
             giro: Giro::new(OCCHIO, Caso::new(tempo::qpc() as u64)),
             registro: Registro::new(OCCHIO),
             storico: None,
+            statistiche: Statistiche::default(),
             // Il banco non usa lo storico: niente lettura che si mescoli alle sue misure.
-            storico_in_arrivo: banco
-                .is_none()
-                .then(|| std::thread::spawn(move || Storico::carica(storico::cartella_predefinita(), avvio))),
+            storico_in_arrivo: banco.is_none().then(|| std::thread::spawn(carica_storico)),
+            vista: Vista::default(),
             avvio_ms: avvio,
             confronto: None,
             avviso_storico: None,
-            esportato: None,
             latenza: Latenza::new(),
             stato: Stato::Menu,
             imbardata: 0.0,
@@ -374,30 +377,25 @@ impl App {
             ora,
             storico::istante_ms(),
         );
+        let mut sintesi = Sintesi::da_giro(&g, None);
         let (confronto, scritto) = self.storico().aggiungi(g, ora);
         self.confronto = Some(confronto);
-        if let Err(e) = scritto {
-            self.avviso_storico = Some(format!("giro non salvato nello storico: {e}"));
+        match scritto {
+            Ok(p) => sintesi.percorso = Some(p),
+            Err(e) => self.avviso_storico = Some(format!("giro non salvato nello storico: {e}")),
         }
+        self.statistiche.aggiungi(sintesi);
     }
 
     /// Lo storico letto dal thread partito all'avvio; se non ha ancora finito, lo aspetta.
     fn storico(&mut self) -> &mut Storico {
-        let (in_arrivo, avvio) = (&mut self.storico_in_arrivo, self.avvio_ms);
-        self.storico.get_or_insert_with(|| {
-            in_arrivo
-                .take()
-                .and_then(|t| t.join().ok())
-                .unwrap_or_else(|| Storico::carica(storico::cartella_predefinita(), avvio))
-        })
-    }
-
-    fn esporta_csv(&mut self) {
-        let cartella = esporta::documenti().join("aimpro");
-        self.esportato = Some(match esporta::esporta(self.storico().giri(), &cartella, Ora::adesso()) {
-            Ok(p) => format!("Esportato in {}", p.display()),
-            Err(e) => format!("Esportazione non riuscita in {}: {e}", cartella.display()),
-        });
+        if self.storico.is_none() {
+            let (s, st) =
+                self.storico_in_arrivo.take().and_then(|t| t.join().ok()).unwrap_or_else(carica_storico);
+            self.statistiche = st;
+            self.storico = Some(s);
+        }
+        self.storico.as_mut().expect("storico appena caricato")
     }
 
     /// Applica i count fino ai totali `(dx, dy)`.
@@ -555,12 +553,13 @@ impl App {
             (g.scheda.name.clone(), format!("{:?}", g.presentazione()))
         });
         let avviso = self.avviso.clone();
-        let (confronto, avviso_storico, esportato) =
-            (self.confronto, self.avviso_storico.clone(), self.esportato.clone());
+        let (confronto, avviso_storico) = (self.confronto, self.avviso_storico.clone());
         if stato_ora == Stato::Statistiche {
             self.storico();
         }
-        let storico = self.storico.as_ref();
+        let (saltati, statistiche, vista) =
+            (self.storico.as_ref().map(|s| s.saltati), &self.statistiche, &mut self.vista);
+        let (adesso_ms, avvio_ms) = (storico::istante_ms(), self.avvio_ms);
         // Fuori dal giro le misure non cambiano: il testo si ricalcola solo se ci sono frame nuovi.
         let pannello = if self.pannello_visibile {
             let n = self.latenza.versione();
@@ -593,8 +592,9 @@ impl App {
                 Stato::Riepilogo(r) => {
                     interfaccia::riepilogo(ui, &r, confronto.as_ref(), avviso_storico.as_deref())
                 }
-                Stato::Statistiche => storico
-                    .map_or(Azione::TornaAlMenu, |s| interfaccia::statistiche(ui, s, esportato.as_deref())),
+                Stato::Statistiche => saltati.map_or(Azione::TornaAlMenu, |n| {
+                    schermata_statistiche::mostra(ui, vista, statistiche, n, adesso_ms, avvio_ms)
+                }),
                 Stato::Giro => Azione::Nessuna,
             };
             if let Some(t) = &pannello {
@@ -663,12 +663,9 @@ impl App {
             Azione::Statistiche => {
                 self.salva_se_serve();
                 self.torna_al_menu();
-                self.esportato = None;
+                // Si riapre sulla scheda di prima, ma non su un giro aperto.
+                self.vista.dettaglio = None;
                 self.stato = Stato::Statistiche;
-            }
-            Azione::EsportaCsv => {
-                self.esporta_csv();
-                self.ridisegna();
             }
             Azione::Aggiorna => {
                 self.salva_se_serve();
@@ -837,6 +834,11 @@ impl ApplicationHandler for App {
                     PhysicalKey::Code(KeyCode::Escape) => match self.stato {
                         Stato::Giro => self.pausa(),
                         Stato::Pausa => self.riprendi(),
+                        // Esc dal dettaglio di un giro torna all'elenco, poi al menu.
+                        Stato::Statistiche if self.vista.dettaglio.is_some() => {
+                            self.vista.dettaglio = None;
+                            self.ridisegna();
+                        }
                         Stato::Statistiche => self.torna_al_menu(),
                         _ => {}
                     },
@@ -895,4 +897,13 @@ impl ApplicationHandler for App {
             }),
         }
     }
+}
+
+/// Lo storico e la sintesi di ogni giro per le statistiche, in una lettura sola della cartella.
+fn carica_storico() -> (Storico, Statistiche) {
+    let mut sintesi = Vec::new();
+    let s = Storico::carica_con(storico::cartella_predefinita(), |g, p| {
+        sintesi.push(Sintesi::da_giro(g, Some(p)));
+    });
+    (s, Statistiche::da_sintesi(sintesi))
 }

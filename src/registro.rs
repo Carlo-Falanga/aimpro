@@ -22,6 +22,12 @@ pub struct Bersaglio {
     pub distanza_gradi: f64,
     /// Volte che il mirino è entrato nella sfera e ne è uscito senza colpirla.
     pub overshoot: u32,
+    /// Spostamento dal bersaglio precedente in gradi: orizzontale (positivo verso destra) e verticale (positivo
+    /// verso l'alto). Manca nei giri salvati prima che ci fosse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orizzontale_gradi: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verticale_gradi: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -49,6 +55,23 @@ fn somma_tempi(g: &Giro) -> f64 {
 
 fn angolo_gradi(a: DVec3, b: DVec3) -> f64 {
     a.dot(b).clamp(-1.0, 1.0).acos().to_degrees()
+}
+
+/// Imbardata e beccheggio di una direzione, in gradi (come `camera::avanti`: imbardata positiva a destra).
+fn angoli_gradi(d: DVec3) -> (f64, f64) {
+    (d.x.atan2(-d.z).to_degrees(), d.y.clamp(-1.0, 1.0).asin().to_degrees())
+}
+
+/// Da `a` a `b`: gradi in orizzontale (positivi a destra, presi dal lato più corto) e in verticale (positivi in alto).
+fn spostamento_gradi(a: DVec3, b: DVec3) -> (f64, f64) {
+    let ((ia, ba), (ib, bb)) = (angoli_gradi(a), angoli_gradi(b));
+    let mut o = ib - ia;
+    if o > 180.0 {
+        o -= 360.0;
+    } else if o < -180.0 {
+        o += 360.0;
+    }
+    (o, bb - ba)
 }
 
 impl Registro {
@@ -89,10 +112,13 @@ impl Registro {
             return;
         }
         let somma = somma_tempi(g);
+        let (o, v) = spostamento_gradi(self.precedente, self.attuale);
         let b = Bersaglio {
             tempo_ms: (somma - self.somma_tempi).max(0.0),
             distanza_gradi: angolo_gradi(self.precedente, self.attuale),
             overshoot: self.overshoot,
+            orizzontale_gradi: Some(o),
+            verticale_gradi: Some(v),
         };
         if self.bersagli.len() < MASSIMO_BERSAGLI {
             self.bersagli.push(b);
@@ -201,6 +227,33 @@ mod test {
         assert!((b[0].distanza_gradi - attesa_primo).abs() < 1e-9);
         assert!((b[1].distanza_gradi - attesa_secondo).abs() < 1e-9);
         assert!(b[1].distanza_gradi >= 10.0 - 1e-9, "i bersagli distano almeno 10 gradi");
+    }
+
+    #[test]
+    fn lo_spostamento_dice_destra_sinistra_alto_basso() {
+        let d = |i: f64, b: f64| avanti(i.to_radians(), b.to_radians());
+        let vicino = |(o, v): (f64, f64), (eo, ev): (f64, f64)| {
+            assert!((o - eo).abs() < 1e-9 && (v - ev).abs() < 1e-9, "({o}, {v}) invece di ({eo}, {ev})");
+        };
+        vicino(spostamento_gradi(d(0.0, 0.0), d(30.0, 0.0)), (30.0, 0.0));
+        vicino(spostamento_gradi(d(10.0, 5.0), d(-20.0, 5.0)), (-30.0, 0.0));
+        vicino(spostamento_gradi(d(0.0, -10.0), d(0.0, 15.0)), (0.0, 25.0));
+        // Attraverso le spalle si prende il giro più corto.
+        vicino(spostamento_gradi(d(170.0, 0.0), d(-170.0, 0.0)), (20.0, 0.0));
+    }
+
+    #[test]
+    fn ogni_colpo_registra_lo_spostamento_dal_precedente() {
+        let (mut g, mut r) = pronto(9);
+        let primo = mira(&g);
+        clic(&mut g, &mut r, 100.0, primo);
+        let secondo = mira(&g);
+        clic(&mut g, &mut r, 200.0, secondo);
+        let b = r.bersagli();
+        let (o, v) = spostamento_gradi(primo, secondo);
+        assert_eq!((b[1].orizzontale_gradi, b[1].verticale_gradi), (Some(o), Some(v)));
+        let (o0, v0) = spostamento_gradi(avanti(0.0, 0.0), primo);
+        assert_eq!((b[0].orizzontale_gradi, b[0].verticale_gradi), (Some(o0), Some(v0)));
     }
 
     #[test]
