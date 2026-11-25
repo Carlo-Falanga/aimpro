@@ -93,6 +93,7 @@ fn riga_variazione(ui: &mut Ui, v: &mut Variazione) -> bool {
                     );
                 }
             });
+            ui.label(RichText::new("I giri si salvano ma non fanno record.").color(TENUE).size(12.0));
         }
     });
     *v != prima
@@ -601,7 +602,15 @@ pub fn parametri_scenario(ui: &mut Ui, c: &mut Config, s: &Scenario) -> bool {
         ui.end_row();
     });
     if s.regole.parametri_che_valgono(c.parametri()).standard() {
-        ui.label(RichText::new("Parametri standard: i giri fanno record.").color(TENUE).size(13.0));
+        if c.variazione.attiva {
+            ui.label(
+                RichText::new("Sensibilità a caso: i giri si salvano ma non fanno record.")
+                    .color(AVVISO)
+                    .size(13.0),
+            );
+        } else {
+            ui.label(RichText::new("Parametri standard: i giri fanno record.").color(TENUE).size(13.0));
+        }
     } else {
         ui.horizontal(|ui| {
             ui.label(
@@ -754,6 +763,15 @@ pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, info: &InfoRiepilogo) -> Azione {
                     percento(info.parametri.dimensione),
                     percento(info.parametri.velocita)
                 ))
+                .color(AVVISO)
+                .size(13.0),
+            );
+        }
+        if info.sensibilita_usata.is_some() {
+            ui.label(
+                RichText::new(
+                    "Sensibilità a caso: il giro è salvato con quella usata ma non conta per il record.",
+                )
                 .color(AVVISO)
                 .size(13.0),
             );
@@ -931,7 +949,8 @@ pub fn statistiche(
             let n = giri.len() - inizio;
             ui.label(
                 RichText::new(match n {
-                    0 => "Nessun giro coi parametri standard: il grafico e il record contano solo quelli"
+                    0 => "Nessun giro coi parametri standard e la sensibilità fissa: il grafico e il record \
+                          contano solo quelli"
                         .to_string(),
                     1 => format!("{unita} dell'ultimo giro, con la linea del record"),
                     _ => format!("{unita} degli ultimi {n} giri, con la linea del record"),
@@ -965,7 +984,7 @@ pub fn statistiche(
                 ui.label(
                     RichText::new(if cambiati > 0 {
                         format!(
-                            "{}, di cui {cambiati} coi parametri cambiati (fuori da record e grafico)",
+                            "{}, di cui {cambiati} coi parametri cambiati o la sensibilità a caso (fuori da record e grafico)",
                             tutti.len()
                         )
                     } else {
@@ -999,8 +1018,27 @@ pub fn statistiche(
                                 percentuale(g.precisione),
                                 millisecondi(g.tempo_medio_ms),
                                 if col_tracking { "-".into() } else { g.overshoot.to_string() },
-                                format!("{} {}", g.impostazioni.gioco.nome(), g.impostazioni.sensibilita),
-                                if g.standard() {
+                                match g.impostazioni.a_caso {
+                                    Some(a) if a.valori > 1 => format!(
+                                        "{} a caso ({:.3}-{:.3})",
+                                        g.impostazioni.gioco.nome(),
+                                        a.minima,
+                                        a.massima
+                                    ),
+                                    Some(_) => format!(
+                                        "{} a caso ({:.3})",
+                                        g.impostazioni.gioco.nome(),
+                                        g.impostazioni.sensibilita
+                                    ),
+                                    None => {
+                                        format!(
+                                            "{} {}",
+                                            g.impostazioni.gioco.nome(),
+                                            g.impostazioni.sensibilita
+                                        )
+                                    }
+                                },
+                                if g.parametri.standard() {
                                     "standard".into()
                                 } else {
                                     format!(

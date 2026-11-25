@@ -228,13 +228,21 @@ tracking = 0.62                 # solo negli scenari di tracking: la frazione de
 
 [impostazioni]                  # quelle con cui si è giocato il giro
 gioco = "cs2"                   # cs2, valorant, apex, overwatch2, destiny2, marathon, cm360
-sensibilita = 1.25
-cm_360 = 41.56
+sensibilita = 1.25              # con la sensibilità a caso e un valore solo nel giro: quella usata
+cm_360 = 41.56                  # coerente con sensibilita
 fov = 90.0
 dpi = 800.0
 vsync = false
 limite_fps = 0                  # 0 = nessun limite
 versione = "0.1.0"              # versione di aimpro
+moltiplicatore_y = 0.8          # solo se non è 1: la sensibilità verticale sull'orizzontale
+
+[impostazioni.a_caso]           # solo se il giro è stato giocato con la sensibilità a caso
+entro_pct = 15.0                # ±N%
+base = 1.25                     # la sensibilità del menu
+minima = 1.13                   # la più bassa e la più alta usate (uguali con un valore solo)
+massima = 1.13
+valori = 1                      # quanti valori nel giro
 
 [parametri]                     # dimensione e velocità dei bersagli; nel formato 1 manca: standard
 dimensione = 1.0
@@ -249,7 +257,8 @@ overshoot = 1
 All'avvio un thread legge tutti i file, mentre la finestra si apre (il primo che serve lo storico, a fine giro o
 nelle Statistiche, lo aspetta); uno rovinato (o di un formato più nuovo, o senza i campi obbligatori) si salta e
 si conta, e la schermata Statistiche lo dice. I file del formato 1 si leggono ancora. In memoria i giri restano senza
-i bersagli. Il record di uno scenario è il punteggio del suo giro migliore fra quelli coi parametri standard; "nuovo
+i bersagli. Il record di uno scenario è il punteggio del suo giro migliore fra quelli coi parametri standard e senza la
+sensibilità a caso; "nuovo
 record" quando un giro lo supera (pareggiarlo no; il primo giro di uno scenario è record se ha punteggio più di
 zero). Uno scenario nuovo usa un suo `scenario = "<id>"` e gli stessi campi; campi in più vanno
 aggiunti con un valore predefinito (`#[serde(default)]`), così i file vecchi si leggono ancora; un cambio che i
@@ -264,7 +273,7 @@ con la virgola, data `GG/MM/AAAA hh:mm:ss`, UTF-8 con il BOM, righe chiuse da CR
 ```
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # 184 test: scenari, giro, tracking, shader, home, sensibilità e variazione, impostazioni, mirino, colori, suoni, menu, visuale, registro, storico, CSV, misure, tempo, aggiornamento
+cargo test                      # 190 test: scenari, giro, tracking, shader, home, sensibilità e variazione, impostazioni, mirino, colori, suoni, menu, visuale, registro, storico, CSV, misure, tempo, aggiornamento
 cargo run --release             # il gioco, a schermo intero (Esc pausa, F3 pannello della latenza)
 cargo run --release -- --finestra            # in una finestra normale
 cargo run --release -- --bench --secondi 15  # il banco: misura da solo ed esce, scrive misure\bench-<ora>.md

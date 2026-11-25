@@ -282,9 +282,16 @@ fn gioca(ui: &mut Ui, h: &mut Home, c: &mut Config, info: &InfoHome) -> Azione {
                 .color(TENUE),
             );
             ui.label(interfaccia::spiegazione(&s));
-            if !s.regole.parametri_che_valgono(c.parametri()).standard() {
+            let perche =
+                match (!s.regole.parametri_che_valgono(c.parametri()).standard(), c.variazione.attiva) {
+                    (true, true) => Some("Parametri cambiati e sensibilità a caso"),
+                    (true, false) => Some("Parametri cambiati"),
+                    (false, true) => Some("Sensibilità a caso"),
+                    (false, false) => None,
+                };
+            if let Some(p) = perche {
                 ui.label(
-                    RichText::new("Parametri cambiati: i giri si salvano ma non fanno record.")
+                    RichText::new(format!("{p}: i giri si salvano ma non fanno record."))
                         .color(AVVISO)
                         .size(13.0),
                 );
@@ -513,9 +520,11 @@ fn scenario(
         ui.label(
             RichText::new(format!(
                 "Record: {}",
-                record.map_or("nessuno ancora (contano i giri coi parametri standard)".to_string(), |r| {
-                    valore(r, tracking)
-                })
+                record.map_or(
+                    "nessuno ancora (contano i giri coi parametri standard e la sensibilità fissa)"
+                        .to_string(),
+                    |r| { valore(r, tracking) }
+                )
             ))
             .strong(),
         );
@@ -529,14 +538,17 @@ fn scenario(
                 ui.label(RichText::new(&g.data).color(TENUE).size(13.0));
                 ui.label(RichText::new(valore(g.punteggio(), tracking)).strong());
                 ui.label(
-                    RichText::new(if g.standard() {
-                        "parametri standard".to_string()
-                    } else {
+                    RichText::new(if !g.parametri.standard() {
                         format!(
-                            "dimensione {:.0}%, velocità {:.0}%: fuori dal record",
+                            "dimensione {:.0}%, velocità {:.0}%{}: fuori dal record",
                             g.parametri.dimensione * 100.0,
-                            g.parametri.velocita * 100.0
+                            g.parametri.velocita * 100.0,
+                            if g.impostazioni.a_caso.is_some() { ", sensibilità a caso" } else { "" }
                         )
+                    } else if g.impostazioni.a_caso.is_some() {
+                        "sensibilità a caso: fuori dal record".to_string()
+                    } else {
+                        "parametri standard".to_string()
                     })
                     .color(TENUE)
                     .size(13.0),
