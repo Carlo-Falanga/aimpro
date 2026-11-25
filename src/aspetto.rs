@@ -49,6 +49,10 @@ pub struct ColoriStanza {
     pub linee: [f32; 3],
     /// Il fondo dietro i pannelli (si vede solo fuori dalla stanza, all'avvio).
     pub fondo: [f32; 3],
+    /// Tempo e punteggio nel giro: chiari sulle stanze scure, scuri su Sabbia.
+    pub testo: [f32; 4],
+    /// La precisione dal vivo e la barra del tempo: l'arancio di sempre, più scuro su Sabbia.
+    pub accento: [f32; 4],
 }
 
 impl Tema {
@@ -70,6 +74,8 @@ impl Tema {
                 pareti: [0.16, 0.168, 0.185],
                 linee: [0.27, 0.285, 0.31],
                 fondo: [0.07, 0.07, 0.08],
+                testo: CHIARO,
+                accento: ARANCIO,
             },
             Tema::Notte => ColoriStanza {
                 pavimento: [0.055, 0.07, 0.105],
@@ -77,6 +83,8 @@ impl Tema {
                 pareti: [0.07, 0.085, 0.125],
                 linee: [0.16, 0.22, 0.33],
                 fondo: [0.03, 0.035, 0.05],
+                testo: CHIARO,
+                accento: ARANCIO,
             },
             Tema::Sabbia => ColoriStanza {
                 pavimento: [0.6, 0.56, 0.5],
@@ -84,10 +92,17 @@ impl Tema {
                 pareti: [0.74, 0.71, 0.66],
                 linee: [0.5, 0.46, 0.4],
                 fondo: [0.62, 0.6, 0.56],
+                testo: [0.12, 0.11, 0.1, 0.92],
+                accento: [0.34, 0.17, 0.0, 0.95],
             },
         }
     }
 }
+
+/// Il testo del giro sulle stanze scure (quello di prima).
+const CHIARO: [f32; 4] = [0.92, 0.92, 0.92, 0.9];
+/// L'arancio della precisione e della barra sulle stanze scure (quello di prima).
+const ARANCIO: [f32; 4] = [1.0, 0.69, 0.13, 0.95];
 
 /// Un colore di 8 bit per canale in un vec4 per lo shader (in gamma, come la superficie).
 pub fn vec4(c: [u8; 3]) -> [f32; 4] {
@@ -115,6 +130,31 @@ mod test {
         assert_eq!(g.pareti, [0.16, 0.168, 0.185]);
         assert_eq!(g.linee, [0.27, 0.285, 0.31]);
         assert_eq!(g.fondo, [0.07, 0.07, 0.08]);
+    }
+
+    /// Tempo, punteggio e precisione stanno sul soffitto e sulle pareti: in ogni tema devono staccare almeno 4,5 a 1
+    /// (la soglia WCAG del testo).
+    #[test]
+    fn il_tempo_si_legge_in_ogni_tema() {
+        fn luminanza(c: [f32; 3]) -> f32 {
+            let l = |v: f32| if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+            0.2126 * l(c[0]) + 0.7152 * l(c[1]) + 0.0722 * l(c[2])
+        }
+        for t in Tema::TUTTI {
+            let c = t.colori();
+            for colore in [c.testo, c.accento] {
+                for fondo in [c.soffitto, c.pareti] {
+                    // Quello che si vede: il colore mescolato col fondo secondo la sua opacità (in gamma, come la
+                    // superficie).
+                    let a = colore[3];
+                    let visto: [f32; 3] = std::array::from_fn(|i| colore[i] * a + fondo[i] * (1.0 - a));
+                    let testo = luminanza(visto);
+                    let f = luminanza(fondo);
+                    let rapporto = (testo.max(f) + 0.05) / (testo.min(f) + 0.05);
+                    assert!(rapporto >= 4.5, "{}: {rapporto}", t.nome());
+                }
+            }
+        }
     }
 
     #[test]

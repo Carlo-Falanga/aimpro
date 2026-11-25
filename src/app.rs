@@ -523,7 +523,7 @@ impl App {
         }
         let ora = Ora::adesso();
         let id = self.scenario().id.clone();
-        let g = GiroSalvato::nuovo(
+        let mut g = GiroSalvato::nuovo(
             &id,
             self.giro.durata_ms() / 1000.0,
             r,
@@ -533,6 +533,8 @@ impl App {
             ora,
             storico::istante_ms(),
         );
+        // Con la sensibilità a caso il giro si salva con quella usata e non fa record.
+        g.impostazioni = g.impostazioni.clone().con_a_caso(&self.config, &self.casuale);
         let (confronto, scritto) = self.storico().aggiungi(g, ora);
         self.confronto = Some(confronto);
         if let Err(e) = scritto {

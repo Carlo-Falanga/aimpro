@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::giro::Riepilogo;
 use crate::registro::{Bersaglio, Registro};
 use crate::scenari::Parametri;
-use crate::sensibilita::{Gioco, cm_per_360};
+use crate::sensibilita::{Casuale, Gioco, cm_per_360};
 
 /// Versione del formato dei file dello storico. Il 2 aggiunge punteggio, tracking e parametri; i file del formato 1
 /// si leggono ancora (punteggio = colpi, parametri standard).
@@ -32,6 +32,33 @@ pub struct Impostazioni {
     pub limite_fps: u32,
     /// Versione di aimpro che ha giocato il giro.
     pub versione: String,
+    /// La sensibilità verticale rispetto all'orizzontale; nel file solo se non è 1 (i file di prima non ce l'hanno).
+    #[serde(default = "uno", skip_serializing_if = "e_uno")]
+    pub moltiplicatore_y: f64,
+    /// C'è solo se il giro è stato giocato con la sensibilità a caso: allora non fa record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub a_caso: Option<ACaso>,
+}
+
+/// La sensibilità a caso di un giro, nelle unità del gioco (per i cm/360: centimetri).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ACaso {
+    /// Entro ±N% dalla base.
+    pub entro_pct: f64,
+    /// La sensibilità scelta nel menu.
+    pub base: f64,
+    /// La più bassa e la più alta usate nel giro (uguali con un valore solo).
+    pub minima: f64,
+    pub massima: f64,
+    pub valori: u32,
+}
+
+fn uno() -> f64 {
+    1.0
+}
+
+fn e_uno(v: &f64) -> bool {
+    *v == 1.0
 }
 
 impl Impostazioni {
@@ -45,7 +72,32 @@ impl Impostazioni {
             vsync: c.vsync,
             limite_fps: c.limite_fps,
             versione: env!("CARGO_PKG_VERSION").to_string(),
+            moltiplicatore_y: c.moltiplicatore_y,
+            a_caso: None,
         }
+    }
+
+    /// Con la sensibilità a caso del giro: `sensibilita` e `cm_360` diventano quelle usate se il giro ne ha avuta
+    /// una sola (con più valori restano la base, e minima e massima stanno in `a_caso`).
+    pub fn con_a_caso(mut self, c: &Config, caso: &Casuale) -> Self {
+        if !caso.attiva() || caso.valori == 0 {
+            return self;
+        }
+        // Un fattore più alto gira di più: per i cm/360 vuol dire meno centimetri.
+        let usata = |f: f64| if c.gioco == Gioco::Cm360 { c.sensibilita / f } else { c.sensibilita * f };
+        let (a, b) = (usata(caso.minimo), usata(caso.massimo));
+        if caso.valori == 1 {
+            self.sensibilita = usata(caso.fattore);
+            self.cm_360 = cm_per_360(c.gioco, self.sensibilita, c.dpi);
+        }
+        self.a_caso = Some(ACaso {
+            entro_pct: c.variazione.percento,
+            base: c.sensibilita,
+            minima: a.min(b),
+            massima: a.max(b),
+            valori: caso.valori,
+        });
+        self
     }
 }
 
@@ -166,9 +218,9 @@ impl GiroSalvato {
         self.punteggio.unwrap_or(f64::from(self.colpi))
     }
 
-    /// Giocato coi parametri dello scenario: solo questi fanno record e grafico.
+    /// Giocato coi parametri dello scenario e con la sensibilità fissa: solo questi fanno record e grafico.
     pub fn standard(&self) -> bool {
-        self.parametri.standard()
+        self.parametri.standard() && self.impostazioni.a_caso.is_none()
     }
 }
 
@@ -655,6 +707,81 @@ overshoot = 1
         assert_eq!(s.record("filo"), Some(73.4));
         assert_eq!(s.record(SCATTO), None, "record per scenario");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn config_a_caso(ogni: crate::sensibilita::Ogni) -> Config {
+        let mut c = Config { sensibilita: 2.0, ..Config::default() };
+        c.variazione = crate::sensibilita::Variazione { attiva: true, percento: 15.0, ogni, secondi: 5.0 };
+        c
+    }
+
+    #[test]
+    fn con_la_sensibilita_a_caso_si_salva_quella_usata_e_non_fa_record() {
+        let d = cartella_di_prova("a-caso");
+        let mut s = Storico::carica(d.clone(), 0);
+        s.aggiungi(giro_di_prova(30, 1), ora(1)).1.unwrap();
+        let c = config_a_caso(crate::sensibilita::Ogni::Giro);
+        let mut caso = Casuale::new(7);
+        let f = caso.inizia(&c.variazione);
+        let mut g = giro_di_prova(60, 2);
+        g.impostazioni = Impostazioni::da_config(&c).con_a_caso(&c, &caso);
+        assert!((g.impostazioni.sensibilita - 2.0 * f).abs() < 1e-12, "quella usata");
+        assert!((g.impostazioni.cm_360 - cm_per_360(c.gioco, 2.0 * f, c.dpi)).abs() < 1e-9);
+        let a = g.impostazioni.a_caso.unwrap();
+        assert_eq!((a.entro_pct, a.base, a.valori), (15.0, 2.0, 1));
+        assert_eq!(a.minima, a.massima);
+        assert!(!g.standard());
+        let (confronto, scritto) = s.aggiungi(g, ora(2));
+        let testo = std::fs::read_to_string(scritto.unwrap()).unwrap();
+        assert!(testo.contains("[impostazioni.a_caso]") && testo.contains("entro_pct = 15.0"), "{testo}");
+        assert!(!confronto.standard && !confronto.nuovo_record(), "60 colpi a caso non battono il 30");
+        let s = Storico::carica(d.clone(), 0);
+        assert_eq!(s.giri()[1].impostazioni.a_caso, Some(a), "si rilegge");
+        assert_eq!(s.record(SCATTO), Some(30.0));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn con_piu_valori_resta_la_base_con_minima_e_massima() {
+        let c = config_a_caso(crate::sensibilita::Ogni::Secondi);
+        let mut caso = Casuale::new(11);
+        caso.inizia(&c.variazione);
+        for s in 1..30 {
+            caso.aggiorna(&c.variazione, f64::from(s), 30.0);
+        }
+        assert!(caso.valori > 1);
+        let i = Impostazioni::da_config(&c).con_a_caso(&c, &caso);
+        let a = i.a_caso.unwrap();
+        assert_eq!(i.sensibilita, 2.0, "la base");
+        assert!(a.minima < a.massima && a.minima >= 2.0 * 0.85 - 1e-12 && a.massima <= 2.0 * 1.15 + 1e-12);
+        assert_eq!(a.valori, caso.valori);
+    }
+
+    #[test]
+    fn coi_cm360_la_sensibilita_usata_e_in_centimetri() {
+        let mut c = config_a_caso(crate::sensibilita::Ogni::Giro);
+        (c.gioco, c.sensibilita) = (Gioco::Cm360, 40.0);
+        let mut caso = Casuale::new(3);
+        let f = caso.inizia(&c.variazione);
+        let i = Impostazioni::da_config(&c).con_a_caso(&c, &caso);
+        assert!((i.sensibilita - 40.0 / f).abs() < 1e-9);
+        assert!((i.cm_360 - 40.0 / f).abs() < 1e-9);
+    }
+
+    #[test]
+    fn senza_sensibilita_a_caso_il_file_resta_come_prima() {
+        let c = Config::default();
+        let mut caso = Casuale::new(1);
+        caso.inizia(&c.variazione);
+        let i = Impostazioni::da_config(&c).con_a_caso(&c, &caso);
+        assert_eq!(i, Impostazioni::da_config(&c));
+        let testo = toml::to_string(&i).unwrap();
+        assert!(!testo.contains("a_caso") && !testo.contains("moltiplicatore_y"), "{testo}");
+        // Un file di prima, senza i campi nuovi: moltiplicatore 1 e niente sensibilità a caso.
+        let letta: Impostazioni = toml::from_str(&testo).unwrap();
+        assert_eq!((letta.moltiplicatore_y, letta.a_caso), (1.0, None));
+        let c = Config { moltiplicatore_y: 0.8, ..Config::default() };
+        assert!(toml::to_string(&Impostazioni::da_config(&c)).unwrap().contains("moltiplicatore_y = 0.8"));
     }
 
     #[test]

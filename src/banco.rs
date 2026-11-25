@@ -5,7 +5,7 @@
 //! icona. Gira senza clic di chi guarda: chiede da sé il primo piano.
 //!
 //! Nelle fasi di giro un thread simula il mouse con `SendInput` (movimento ogni millisecondo, un clic ogni
-//! 250 ms), **solo se la finestra di aimpro è in primo piano**: un clic simulato non deve mai finire in un altro
+//! 250 ms, o 10 ms nella fase dei clic fitti), **solo se la finestra di aimpro è in primo piano**: un clic simulato non deve mai finire in un altro
 //! programma. L'input simulato passa dal Raw Input come quello vero; il cursore di Windows resta fermo, bloccato
 //! al centro della finestra. Nel menu il thread manda invece messaggi di movimento alla finestra, senza clic e
 //! senza muovere il cursore. Prima di cambiare fase il thread si ferma e lo conferma.
@@ -42,6 +42,8 @@ enum Tipo {
         suoni: bool,
         /// L'id dello scenario del giro.
         scenario: &'static str,
+        /// Un clic simulato ogni tanti millisecondi.
+        clic_ms: i64,
     },
     Riepilogo,
     Pausa,
@@ -80,6 +82,8 @@ pub struct Banco {
     inietta: Arc<AtomicBool>,
     /// Con `inietta`: anche i clic (solo nel giro, nel menu premerebbero i pulsanti).
     clic: Arc<AtomicBool>,
+    /// Ogni quanti millisecondi un clic, nella fase di giro in corso.
+    ogni_clic_ms: Arc<AtomicI64>,
     /// Movimenti mandati dal thread del banco, con SendInput nel giro o come messaggi nel menu.
     iniettati: Arc<AtomicU64>,
     /// Il thread del mouse è fermo: l'ha visto `inietta` falso e non manderà niente finché non torna vero.
@@ -129,6 +133,7 @@ impl Banco {
                     pannello: false,
                     suoni: false,
                     scenario: "scatto",
+                    clic_ms: 250,
                 },
                 secondi: 3.0,
             },
@@ -142,6 +147,7 @@ impl Banco {
                     pannello: false,
                     suoni: false,
                     scenario: "scatto",
+                    clic_ms: 250,
                 },
                 secondi: g,
             },
@@ -153,6 +159,7 @@ impl Banco {
                     pannello: false,
                     suoni: false,
                     scenario: "scatto",
+                    clic_ms: 250,
                 },
                 secondi: g,
             },
@@ -164,6 +171,7 @@ impl Banco {
                     pannello: false,
                     suoni: false,
                     scenario: "scatto",
+                    clic_ms: 250,
                 },
                 secondi: g,
             },
@@ -175,6 +183,7 @@ impl Banco {
                     pannello: false,
                     suoni: false,
                     scenario: "scatto",
+                    clic_ms: 250,
                 },
                 secondi: g,
             },
@@ -186,6 +195,7 @@ impl Banco {
                     pannello: true,
                     suoni: false,
                     scenario: "scatto",
+                    clic_ms: 250,
                 },
                 secondi: g,
             },
@@ -197,6 +207,21 @@ impl Banco {
                     pannello: false,
                     suoni: true,
                     scenario: "scatto",
+                    clic_ms: 250,
+                },
+                secondi: g,
+            },
+            // Come "giro, vsync spento" ma con un clic ogni 10 ms: almeno mille clic in 15 secondi, per una mediana di
+            // clic→present che non dipenda da qualche decina di campioni.
+            Fase {
+                nome: "giro, vsync spento, un clic ogni 10 ms",
+                tipo: Tipo::Giro {
+                    vsync: false,
+                    limite_per_hz: 0.0,
+                    pannello: false,
+                    suoni: false,
+                    scenario: "scatto",
+                    clic_ms: 10,
                 },
                 secondi: g,
             },
@@ -209,6 +234,7 @@ impl Banco {
                     pannello: false,
                     suoni: false,
                     scenario: "deriva",
+                    clic_ms: 250,
                 },
                 secondi: g,
             },
@@ -220,6 +246,7 @@ impl Banco {
                     pannello: false,
                     suoni: false,
                     scenario: "filo",
+                    clic_ms: 250,
                 },
                 secondi: g,
             },
@@ -231,6 +258,7 @@ impl Banco {
                     pannello: false,
                     suoni: false,
                     scenario: "guizzo",
+                    clic_ms: 250,
                 },
                 secondi: g,
             },
@@ -242,6 +270,7 @@ impl Banco {
                     pannello: false,
                     suoni: false,
                     scenario: "terna",
+                    clic_ms: 250,
                 },
                 secondi: g,
             },
@@ -253,6 +282,7 @@ impl Banco {
                     pannello: false,
                     suoni: false,
                     scenario: "sciame",
+                    clic_ms: 250,
                 },
                 secondi: g,
             },
@@ -269,6 +299,7 @@ impl Banco {
             csv_fasi: "fase,qpc_inizio,qpc_fine,frequenza_qpc,valida\n".to_string(),
             inietta: Arc::new(AtomicBool::new(false)),
             clic: Arc::new(AtomicBool::new(false)),
+            ogni_clic_ms: Arc::new(AtomicI64::new(250)),
             iniettati: Arc::new(AtomicU64::new(0)),
             fermo: Arc::new(AtomicBool::new(true)),
             cursore_prima: sistema::posizione_cursore(),
@@ -298,6 +329,7 @@ impl Banco {
         });
         let (inietta, fine, h) = (self.inietta.clone(), self.fine.clone(), self.hwnd.clone());
         let clic = self.clic.clone();
+        let ogni_clic_ms = self.ogni_clic_ms.clone();
         let iniettati = self.iniettati.clone();
         let fermo = self.fermo.clone();
         let cpu = self.cpu_banco.clone();
@@ -348,7 +380,8 @@ impl Banco {
                     if mandato {
                         iniettati.fetch_add(1, Ordering::Relaxed);
                     }
-                    if passo % 250 == 125 && clic.load(Ordering::Acquire) {
+                    let ogni = ogni_clic_ms.load(Ordering::Acquire).max(1);
+                    if passo % ogni == ogni / 2 && clic.load(Ordering::Acquire) {
                         sistema::simula_clic(hwnd);
                     }
                     passo += 1;
@@ -394,7 +427,8 @@ impl Banco {
                     self.inietta.store(true, Ordering::Release);
                 }
             }
-            Tipo::Giro { vsync, limite_per_hz, pannello, scenario, .. } => {
+            Tipo::Giro { vsync, limite_per_hz, pannello, scenario, clic_ms, .. } => {
+                self.ogni_clic_ms.store(clic_ms, Ordering::Release);
                 app.mostra_pannello(pannello);
                 let limite = (app.hz_schermo * limite_per_hz).round() as u32;
                 app.imposta_vsync_e_limite(vsync, limite);
@@ -466,7 +500,9 @@ impl Banco {
                 format!("{:.2} / {:.2} / {:.2} / {:.2}", x.mediana, x.p99, x.p999, x.massimo)
             }
         };
-        if let Some(motivo) = self.verifica(app, f, p, frame, m.count_present_vecchio.n, durata_ms) {
+        if let Some(motivo) =
+            self.verifica(app, f, p, frame, (m.count_present_vecchio.n, m.clic_present.n), durata_ms)
+        {
             self.non_valida = true;
             let _ = writeln!(self.note, "- {}: NON VALIDA, {}", f.nome, motivo);
         }
@@ -484,7 +520,11 @@ impl Banco {
             if nel_giro && m.frame.n > 0 { format!("{:.3}", m.frame.deviazione) } else { "-".into() },
             if nel_giro { r4(&m.count_present_vecchio) } else { "-".into() },
             if nel_giro { r(&m.count_present_recente) } else { "-".into() },
-            if nel_giro { r(&m.clic_present) } else { "-".into() },
+            if nel_giro && m.clic_present.n > 0 {
+                format!("{} ({} clic)", r(&m.clic_present), m.clic_present.n)
+            } else {
+                "-".into()
+            },
             if nel_giro && m.attesa.n > 0 {
                 format!("{:.3} / {:.3}", m.attesa.mediana, m.lavoro.mediana)
             } else {
@@ -529,7 +569,7 @@ impl Banco {
         f: Fase,
         p: &Partenza,
         frame: u64,
-        campioni: usize,
+        (campioni, clic): (usize, usize),
         durata_ms: f64,
     ) -> Option<String> {
         let hwnd = self.hwnd.load(Ordering::Acquire) as isize;
@@ -546,7 +586,9 @@ impl Banco {
             }
         };
         match f.tipo {
-            Tipo::Giro { vsync, limite_per_hz, pannello, suoni, scenario } => {
+            Tipo::Giro { vsync, limite_per_hz, pannello, suoni, scenario, clic_ms } => {
+                // Clic attesi: uno ogni clic_ms, con lo stesso margine dei movimenti.
+                let clic_attesi = (durata_ms * 0.9 / clic_ms as f64) as usize;
                 let richiesti = app.suoni_richiesti().wrapping_sub(p.suoni_richiesti);
                 let partiti = app.suoni_partiti().wrapping_sub(p.suoni_partiti);
                 // Con i suoni: un clic ogni 250 ms, quindi almeno un suono al secondo, e il thread audio partito.
@@ -572,6 +614,8 @@ impl Banco {
                     Some(format!("lo scenario era {}, non {scenario}", app.scenario().id))
                 } else if app.pannello_visibile != pannello {
                     Some("il pannello F3 non era come la fase lo chiede".into())
+                } else if clic_ms <= 10 && clic < clic_attesi {
+                    Some(format!("misurati solo {clic} clic su {clic_attesi} attesi"))
                 } else if frame == 0 || campioni == 0 {
                     Some("nessun frame del giro misurato".into())
                 } else {

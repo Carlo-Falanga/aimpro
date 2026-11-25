@@ -17,10 +17,15 @@ fn colore3(c: [f32; 3]) -> Color32 {
     colore32([c[0], c[1], c[2], 1.0])
 }
 
+/// Alta quanto il mirino più grande (spazio, braccio e bordo al massimo da ogni lato) più un margine: nessun
+/// valore del menu la taglia.
+const ALTEZZA_ANTEPRIMA: f32 = 2.0 * (LIMITI_SPAZIO.1 + LIMITI_LUNGHEZZA.1 + LIMITI_BORDO.1) + 12.0;
+
 /// L'anteprima del mirino sulla parete della stanza del tema scelto, con gli stessi pixel del giro
 /// (`mirino::pezzi`).
 fn anteprima(ui: &mut Ui, m: &Mirino, tema: Tema) {
-    let (area, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 120.0), Sense::hover());
+    let (area, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), ALTEZZA_ANTEPRIMA), Sense::hover());
     let p = ui.painter_at(area);
     let stanza = tema.colori();
     p.rect_filled(area, CornerRadius::same(8), colore3(stanza.pareti));
@@ -206,4 +211,31 @@ pub fn suoni(ui: &mut Ui, c: &mut Config, guasto: bool) -> Option<bool> {
         );
     }
     esito
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Il mirino più grande che il menu permette sta tutto nell'anteprima (a scala 1, come nel giro a 1080p),
+    /// per ogni forma: nel giro si vede intero, e l'anteprima deve mostrarlo uguale.
+    #[test]
+    fn il_mirino_piu_grande_sta_nell_anteprima() {
+        for forma in [Forma::Croce, Forma::Punto, Forma::Cerchio] {
+            let m = Mirino {
+                forma,
+                lunghezza: LIMITI_LUNGHEZZA.1,
+                spessore: LIMITI_SPESSORE.1,
+                spazio: LIMITI_SPAZIO.1,
+                bordo: LIMITI_BORDO.1,
+                colore: [255, 255, 255],
+            };
+            let mut pezzi = [mirino::Pezzo::default(); mirino::MAX_PEZZI];
+            let n = mirino::pezzi(&m, 0.0, 0.0, 1.0, &mut pezzi);
+            for q in &pezzi[..n] {
+                let fuori = q.x.abs().max((q.x + q.w).abs()).max(q.y.abs()).max((q.y + q.h).abs());
+                assert!(fuori <= ALTEZZA_ANTEPRIMA / 2.0, "{forma:?}: {fuori}");
+            }
+        }
+    }
 }
