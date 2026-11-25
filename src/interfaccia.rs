@@ -5,10 +5,13 @@
 use egui::{Align2, Color32, CornerRadius, FontId, Frame, Margin, Pos2, RichText, Sense, Shape, Stroke, Ui};
 
 use crate::aggiornamento::Stato as StatoAggiornamento;
-use crate::config::{Config, LIMITI_DPI, LIMITI_FOV, LIMITI_FPS, LIMITI_SENSIBILITA};
+use crate::config::{Config, LIMITI_DPI, LIMITI_FOV, LIMITI_FPS, LIMITI_MOLTIPLICATORE_Y};
 use crate::giro::Riepilogo;
 use crate::scenari::{LIMITI_PARAMETRO, Parametri, Scenario, TipoMovimento};
-use crate::sensibilita::{Gioco, cm_per_360, converti, gradi_per_count};
+use crate::sensibilita::{
+    Gioco, LIMITI_SECONDI_VARIAZIONE, LIMITI_VARIAZIONE, Ogni, Variazione, cm_per_360, converti,
+    gradi_per_count,
+};
 use crate::storico::{Confronto, GiroSalvato, Storico};
 
 pub const ACCENTO: Color32 = Color32::from_rgb(255, 176, 33);
@@ -28,7 +31,71 @@ pub enum Azione {
     Aggiorna,
     /// Le impostazioni sono cambiate: si salvano e si applicano.
     Impostazioni,
+    /// "Senti": il suono del colpo, col volume scelto.
+    ProvaSuono,
     Chiudi,
+}
+
+/// Le parti del menu delle impostazioni.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Sezione {
+    #[default]
+    Gioco,
+    Mirino,
+    Aspetto,
+    Suoni,
+}
+
+impl Sezione {
+    pub const TUTTE: [Sezione; 4] = [Sezione::Gioco, Sezione::Mirino, Sezione::Aspetto, Sezione::Suoni];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Sezione::Gioco => "Sensibilità",
+            Sezione::Mirino => "Mirino",
+            Sezione::Aspetto => "Bersagli e stanza",
+            Sezione::Suoni => "Suoni",
+        }
+    }
+}
+
+/// La sensibilità a caso: acceso, ±N%, a ogni giro o ogni N secondi. Vero se è cambiata.
+fn riga_variazione(ui: &mut Ui, v: &mut Variazione) -> bool {
+    let prima = *v;
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut v.attiva, "entro ±");
+            ui.add_enabled(
+                v.attiva,
+                egui::DragValue::new(&mut v.percento)
+                    .range(LIMITI_VARIAZIONE.0..=LIMITI_VARIAZIONE.1)
+                    .speed(0.2)
+                    .max_decimals(1)
+                    .suffix("%"),
+            );
+        });
+        if v.attiva {
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("variazione ogni")
+                    .selected_text(if v.ogni == Ogni::Giro { "a ogni giro" } else { "ogni" })
+                    .width(110.0)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut v.ogni, Ogni::Giro, "a ogni giro");
+                        ui.selectable_value(&mut v.ogni, Ogni::Secondi, "ogni");
+                    });
+                if v.ogni == Ogni::Secondi {
+                    ui.add(
+                        egui::DragValue::new(&mut v.secondi)
+                            .range(LIMITI_SECONDI_VARIAZIONE.0..=LIMITI_SECONDI_VARIAZIONE.1)
+                            .speed(0.1)
+                            .max_decimals(1)
+                            .suffix(" s"),
+                    );
+                }
+            });
+        }
+    });
+    *v != prima
 }
 
 /// Informazioni da mostrare nel menu.
@@ -41,6 +108,8 @@ pub struct InfoMenu<'a> {
     pub aggiornamento: &'a StatoAggiornamento,
     /// Gli Hz dello schermo, arrotondati (0 se Windows non li dice): la voce del limite pari a questi dice "(schermo)".
     pub hz_schermo: u32,
+    /// L'uscita audio non si è aperta (o si è persa): i suoni sono muti.
+    pub audio_guasto: bool,
     /// Gli scenari da scegliere e gli avvisi dei file di scenario saltati.
     pub scenari: &'a [Scenario],
     pub avvisi_scenari: &'a [String],
@@ -319,13 +388,13 @@ pub fn si_gioca(info: &InfoMenu) -> bool {
     !matches!(info.aggiornamento, StatoAggiornamento::Scarico { .. } | StatoAggiornamento::Pronto(_))
 }
 
-/// Le righe della sensibilità in una griglia a due colonne: gioco, sensibilità, FOV (se `con_fov`) e DPI. Vero se
-/// qualcosa è cambiato.
-pub fn righe_sensibilita(ui: &mut Ui, c: &mut Config, con_fov: bool) -> bool {
+/// Le righe della sensibilità in una griglia a due colonne: gioco, sensibilità, verticale, sensibilità a caso e FOV
+/// (se `complete`) e DPI. Vero se qualcosa è cambiato.
+pub fn righe_sensibilita(ui: &mut Ui, c: &mut Config, complete: bool) -> bool {
     let mut cambiato = false;
     ui.label("Sensibilità di");
     let prima = c.gioco;
-    egui::ComboBox::from_id_salt("gioco").selected_text(c.gioco.nome()).show_ui(ui, |ui| {
+    egui::ComboBox::from_id_salt("gioco").selected_text(c.gioco.nome()).height(400.0).show_ui(ui, |ui| {
         for g in Gioco::TUTTI {
             ui.selectable_value(&mut c.gioco, g, g.nome());
         }
@@ -333,30 +402,42 @@ pub fn righe_sensibilita(ui: &mut Ui, c: &mut Config, con_fov: bool) -> bool {
     if c.gioco != prima {
         // Stessi centimetri per giro nel gioco nuovo; FOV al valore di base del gioco.
         // Dentro i limiti: un valore estremo convertito si ferma al limite invece di tornare al predefinito.
-        c.sensibilita = ((converti(prima, c.sensibilita, c.gioco) * 1_000_000.0).round() / 1_000_000.0)
-            .clamp(LIMITI_SENSIBILITA.0, LIMITI_SENSIBILITA.1);
+        let (min, max) = c.gioco.limiti_sensibilita();
+        c.sensibilita = ((converti(prima, c.sensibilita, c.gioco, c.dpi) * 1_000_000.0).round()
+            / 1_000_000.0)
+            .clamp(min, max);
         c.fov = c.gioco.fov_predefinito();
         cambiato = true;
     }
     ui.end_row();
 
-    ui.label("Sensibilità");
+    ui.label(c.gioco.nome_sensibilita());
+    let (min, max) = c.gioco.limiti_sensibilita();
+    let (passo, decimali) = if c.gioco == Gioco::Cm360 { (0.1, 2) } else { (0.005, 4) };
     cambiato |= ui
-        .add(
-            egui::DragValue::new(&mut c.sensibilita)
-                .range(LIMITI_SENSIBILITA.0..=LIMITI_SENSIBILITA.1)
-                .speed(0.005)
-                .max_decimals(4),
-        )
+        .add(egui::DragValue::new(&mut c.sensibilita).range(min..=max).speed(passo).max_decimals(decimali))
         .changed();
     ui.end_row();
 
-    if con_fov {
-        ui.label(if c.gioco == Gioco::Cs2 {
-            "FOV (su 4:3, 90 in CS2)"
-        } else {
-            "FOV (su 16:9, 103 in Valorant)"
-        });
+    if complete {
+        ui.label("Verticale");
+        cambiato |= ui
+            .add(
+                egui::DragValue::new(&mut c.moltiplicatore_y)
+                    .range(LIMITI_MOLTIPLICATORE_Y.0..=LIMITI_MOLTIPLICATORE_Y.1)
+                    .speed(0.01)
+                    .max_decimals(2)
+                    .prefix("× "),
+            )
+            .on_hover_text("La sensibilità in verticale rispetto a quella orizzontale: 1 = uguale.")
+            .changed();
+        ui.end_row();
+
+        ui.label("Sensibilità a caso");
+        cambiato |= riga_variazione(ui, &mut c.variazione);
+        ui.end_row();
+
+        ui.label(c.gioco.descrizione_fov());
         cambiato |= ui
             .add(
                 egui::DragValue::new(&mut c.fov)
@@ -380,7 +461,7 @@ pub fn riga_cm(ui: &mut Ui, c: &Config) {
     ui.label(
         RichText::new(format!(
             "Ogni count del mouse gira la visuale di {:.4} gradi: a {:.0} DPI un giro completo è {:.1} cm.",
-            gradi_per_count(c.gioco, c.sensibilita),
+            gradi_per_count(c.gioco, c.sensibilita, c.dpi),
             c.dpi,
             cm_per_360(c.gioco, c.sensibilita, c.dpi)
         ))
@@ -389,63 +470,41 @@ pub fn riga_cm(ui: &mut Ui, c: &Config) {
     );
 }
 
-/// Il contenuto della pagina Impostazioni della home.
+/// Il contenuto della pagina Impostazioni della home: sensibilità e gioco, mirino, bersagli e stanza, suoni.
 pub fn impostazioni(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
     let mut azione = Azione::Nessuna;
     titolo_pagina(ui, "Impostazioni", "Valgono per tutti gli scenari e si salvano da sole.");
-    egui::Grid::new("impostazioni").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-        if righe_sensibilita(ui, c, true) {
-            azione = Azione::Impostazioni;
+    let id_sezione = egui::Id::unique("sezione delle impostazioni");
+    let mut sezione = ui.data(|d| d.get_temp::<Sezione>(id_sezione)).unwrap_or_default();
+    ui.horizontal(|ui| {
+        for s in Sezione::TUTTE {
+            ui.selectable_value(&mut sezione, s, RichText::new(s.nome()).size(15.0));
         }
-
-        ui.label("Vsync");
-        if ui.checkbox(&mut c.vsync, "acceso (più latenza, niente tearing)").changed() {
-            azione = Azione::Impostazioni;
-        }
-        ui.end_row();
-
-        if c.vsync {
-            // Col vsync il limite non vale: la riga resta, grigia, e dice perché.
-            // Disegnate come disattivate, cioè più scure delle altre righe.
-            ui.add_enabled(false, egui::Label::new("Limite fps"));
-            // Alta quanto la tendina: accendendo il vsync la pagina non si sposta.
-            let alta = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
-            ui.allocate_ui_with_layout(
-                egui::vec2(0.0, alta),
-                egui::Layout::left_to_right(egui::Align::Center),
-                |ui| ui.add_enabled(false, egui::Label::new("col vsync decide lo schermo")),
-            );
-        } else {
-            ui.label("Limite fps");
-            if riga_limite(ui, c, info.hz_schermo) {
+    });
+    ui.data_mut(|d| d.insert_temp(id_sezione, sezione));
+    ui.add_space(6.0);
+    match sezione {
+        Sezione::Gioco => {
+            if impostazioni_gioco(ui, c, info) {
                 azione = Azione::Impostazioni;
             }
         }
-        ui.end_row();
-
-        ui.label("Schermo intero");
-        if ui.checkbox(&mut c.schermo_intero_esclusivo, "esclusivo (vale dal prossimo avvio)").changed() {
-            azione = Azione::Impostazioni;
+        Sezione::Mirino => {
+            if crate::impostazioni::mirino(ui, c) {
+                azione = Azione::Impostazioni;
+            }
         }
-        ui.end_row();
-
-        ui.label("Nel giro");
-        if ui
-            .checkbox(&mut c.punteggio_dal_vivo, "punteggio e precisione dal vivo, in alto a sinistra")
-            .changed()
-        {
-            azione = Azione::Impostazioni;
+        Sezione::Aspetto => {
+            if crate::impostazioni::aspetto(ui, c) {
+                azione = Azione::Impostazioni;
+            }
         }
-        ui.end_row();
-
-        ui.label("Aggiornamenti");
-        if ui.checkbox(&mut c.controlla_aggiornamenti, "controlla all'avvio").changed() {
-            azione = Azione::Impostazioni;
-        }
-        ui.end_row();
-    });
-    ui.add_space(2.0);
-    riga_cm(ui, c);
+        Sezione::Suoni => match crate::impostazioni::suoni(ui, c, info.audio_guasto) {
+            Some(true) => azione = Azione::ProvaSuono,
+            Some(false) => azione = Azione::Impostazioni,
+            None => {}
+        },
+    }
     if let Some(a) = info.avviso {
         ui.label(RichText::new(a).color(AVVISO).size(13.0));
     }
@@ -475,6 +534,53 @@ pub fn impostazioni(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
         .size(12.0),
     );
     azione
+}
+
+/// La sezione Sensibilità delle impostazioni: sensibilità, vsync, limite, schermo intero, nel giro, aggiornamenti.
+fn impostazioni_gioco(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> bool {
+    let mut cambiato = false;
+    egui::Grid::new("impostazioni").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+        cambiato |= righe_sensibilita(ui, c, true);
+
+        ui.label("Vsync");
+        cambiato |= ui.checkbox(&mut c.vsync, "acceso (più latenza, niente tearing)").changed();
+        ui.end_row();
+
+        if c.vsync {
+            // Col vsync il limite non vale: la riga resta, grigia, e dice perché.
+            // Disegnate come disattivate, cioè più scure delle altre righe.
+            ui.add_enabled(false, egui::Label::new("Limite fps"));
+            // Alta quanto la tendina: accendendo il vsync la pagina non si sposta.
+            let alta = ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+            ui.allocate_ui_with_layout(
+                egui::vec2(0.0, alta),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| ui.add_enabled(false, egui::Label::new("col vsync decide lo schermo")),
+            );
+        } else {
+            ui.label("Limite fps");
+            cambiato |= riga_limite(ui, c, info.hz_schermo);
+        }
+        ui.end_row();
+
+        ui.label("Schermo intero");
+        cambiato |=
+            ui.checkbox(&mut c.schermo_intero_esclusivo, "esclusivo (vale dal prossimo avvio)").changed();
+        ui.end_row();
+
+        ui.label("Nel giro");
+        cambiato |= ui
+            .checkbox(&mut c.punteggio_dal_vivo, "punteggio e precisione dal vivo, in alto a sinistra")
+            .changed();
+        ui.end_row();
+
+        ui.label("Aggiornamenti");
+        cambiato |= ui.checkbox(&mut c.controlla_aggiornamenti, "controlla all'avvio").changed();
+        ui.end_row();
+    });
+    ui.add_space(2.0);
+    riga_cm(ui, c);
+    cambiato
 }
 
 /// Dimensione e velocità dei bersagli (uguali per tutti gli scenari), nella pagina dello scenario. Vero se cambiano.
@@ -568,6 +674,8 @@ pub struct InfoRiepilogo<'a> {
     pub parametri: Parametri,
     pub confronto: Option<&'a Confronto>,
     pub avviso: Option<&'a str>,
+    /// La sensibilità del giro, se era a caso.
+    pub sensibilita_usata: Option<&'a str>,
     /// Quanto manca perché Rigioca risponda.
     pub attesa: std::time::Duration,
 }
@@ -631,6 +739,11 @@ pub fn riepilogo(ui: &mut Ui, r: &Riepilogo, info: &InfoRiepilogo) -> Azione {
                 ui.end_row();
                 ui.label("Rispetto al record");
                 ui.label(RichText::new(differenza).strong().size(16.0));
+                ui.end_row();
+            }
+            if let Some(s) = info.sensibilita_usata {
+                ui.label("Sensibilità usata");
+                ui.label(RichText::new(s).strong().size(16.0));
                 ui.end_row();
             }
         });

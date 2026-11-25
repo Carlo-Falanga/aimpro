@@ -6,7 +6,8 @@
 // nella lista dei comandi, senza buffer da copiare.
 struct Immediati {
     vp: mat4x4<f32>,
-    // x tempo di gioco in secondi (il moto delle sfere), y indice della sfera guardata (-1 nessuna)
+    // x tempo di gioco in secondi (il moto delle sfere), y indice della sfera guardata (-1 nessuna),
+    // z opacità del lampo della sfera colpita, w indice dell'istanza del lampo (-1 nessuno)
     tempo: vec4<f32>,
     destra: vec4<f32>,
     su: vec4<f32>,
@@ -23,16 +24,36 @@ struct Sfera {
     altro: vec4<f32>,
 };
 
-// Quello che nel giro cambia di rado (l'occhio, la zona dei rimbalzi, i tratti delle sfere) sta in un buffer,
-// riscritto solo quando cambia: a una sfera colpita o a un cambio di direzione, non a ogni frame.
+// Quello che nel giro cambia di rado (l'occhio, i colori dei bersagli, il tema della stanza, la zona dei rimbalzi e
+// i tratti delle sfere) sta in un buffer, riscritto solo quando cambia: a una sfera colpita o a un cambio di
+// direzione, non a ogni frame.
 struct Uniformi {
     occhio: vec4<f32>,
+    bersaglio_normale: vec4<f32>,
+    bersaglio_guardato: vec4<f32>,
+    bersaglio_colpito: vec4<f32>,
+    pavimento: vec4<f32>,
+    soffitto: vec4<f32>,
+    pareti: vec4<f32>,
+    linee: vec4<f32>,
     // imbardata minima, massima, beccheggio minimo, massimo dei centri
     zona: vec4<f32>,
-    sfere: array<Sfera, 8>,
+    // le sfere in campo e, subito dopo l'ultima, quella del lampo (ferma dove è stata colpita)
+    sfere: array<Sfera, 9>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniformi;
+
+// Il colore di un bersaglio dal suo stato: 0 normale, 1 guardato (il mirino ci sta sopra), 2 colpito.
+fn colore_bersaglio(stato: f32) -> vec3<f32> {
+    if (stato > 1.5) {
+        return u.bersaglio_colpito.rgb;
+    }
+    if (stato > 0.5) {
+        return u.bersaglio_guardato.rgb;
+    }
+    return u.bersaglio_normale.rgb;
+}
 
 // ---------------------------------------------------------------- stanza
 
@@ -62,18 +83,19 @@ fn fs_stanza(i: UscitaStanza) -> @location(0) vec4<f32> {
     let n = abs(i.normale);
     var uv: vec2<f32>;
     var base: vec3<f32>;
+    // La normale del pavimento guarda in alto (y > 0): pavimento; in basso: soffitto.
     if (n.y > 0.5) {
         uv = i.mondo.xz;
-        base = select(vec3<f32>(0.13, 0.135, 0.15), vec3<f32>(0.105, 0.11, 0.122), i.normale.y > 0.0);
+        base = select(u.soffitto.rgb, u.pavimento.rgb, i.normale.y > 0.0);
     } else if (n.x > 0.5) {
         uv = i.mondo.zy;
-        base = vec3<f32>(0.16, 0.168, 0.185);
+        base = u.pareti.rgb;
     } else {
         uv = i.mondo.xy;
-        base = vec3<f32>(0.16, 0.168, 0.185);
+        base = u.pareti.rgb;
     }
     let l = max(linee(uv, 1.0) * 0.35, linee(uv, 4.0));
-    var c = mix(base, vec3<f32>(0.27, 0.285, 0.31), l * 0.8);
+    var c = mix(base, u.linee.rgb, l * 0.8);
     let distanza = length(i.mondo - u.occhio.xyz);
     c = c * mix(1.0, 0.72, clamp(distanza / 30.0, 0.0, 1.0));
     return vec4<f32>(c, 1.0);
@@ -151,14 +173,29 @@ fn fs_sfera(i: UscitaSfera) -> @location(0) vec4<f32> {
     let d2 = dot(oc, oc) - b * b;
     let dist = sqrt(max(d2, 0.0)) - r;
     // Bordo morbido largo un pixel.
-    let alfa = clamp(0.5 - dist / max(fwidth(dist), 1e-6), 0.0, 1.0);
+    // L'istanza del lampo sfuma; le altre sono piene.
+    let lampo = f32(i.indice) == f.tempo.w;
+    let alfa = clamp(0.5 - dist / max(fwidth(dist), 1e-6), 0.0, 1.0) * select(1.0, f.tempo.z, lampo);
     if (alfa <= 0.0) {
         discard;
     }
     let h = sqrt(max(r * r - d2, 0.0));
     let punto = u.occhio.xyz + rd * (b - h);
     let n = normalize(punto - c);
-    return vec4<f32>(colore_sfera(n, rd, i.indice) * alfa, alfa);
+    // Lo stato per il colore: 2 la sfera del lampo, 1 quella guardata, 0 le altre.
+    var stato = 0.0;
+    if (lampo) {
+        stato = 2.0;
+    } else if (f32(i.indice) == f.tempo.y) {
+        stato = 1.0;
+    }
+    let luce = normalize(vec3<f32>(0.35, 0.8, 0.45));
+    let diffusa = max(dot(n, luce), 0.0);
+    let bordo = pow(1.0 - max(dot(n, -rd), 0.0), 3.0);
+    let colore = colore_bersaglio(stato);
+    // Il riflesso sul bordo: lo stesso colore schiarito (con l'arancione di base è quello di prima).
+    let col = colore * (0.38 + 0.62 * diffusa) + mix(colore, vec3<f32>(1.0), 0.6) * bordo * 0.35;
+    return vec4<f32>(col * alfa, alfa);
 }
 
 // ---------------------------------------------------------------- rettangoli (mirino e tempo)
@@ -166,6 +203,9 @@ fn fs_sfera(i: UscitaSfera) -> @location(0) vec4<f32> {
 struct UscitaRett {
     @builtin(position) pos: vec4<f32>,
     @location(0) colore: vec4<f32>,
+    @location(1) locale: vec2<f32>,
+    // raggio interno, raggio esterno, tipo
+    @location(2) anello: vec3<f32>,
 };
 
 @vertex
@@ -174,13 +214,14 @@ fn vs_rett(
     @location(0) rett: vec4<f32>,
     @location(1) colore: vec4<f32>,
     @location(2) tipo: f32,
+    @location(3) anello: vec2<f32>,
 ) -> UscitaRett {
     var angoli = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0),
     );
     var larghezza = rett.z;
-    if (tipo > 0.5) {
+    if (tipo > 0.5 && tipo < 1.5) {
         // La barra del tempo: la larghezza segue la frazione rimasta, senza riscrivere il buffer.
         larghezza = rett.z * f.schermo.z;
     }
@@ -189,10 +230,22 @@ fn vs_rett(
     var o: UscitaRett;
     o.pos = vec4<f32>(c.x, -c.y, 0.0, 1.0);
     o.colore = vec4<f32>(colore.rgb * colore.a, colore.a);
+    // Per l'anello: la distanza in pixel dal centro del rettangolo e i due raggi.
+    o.locale = (angoli[v] - 0.5) * vec2<f32>(larghezza, rett.w);
+    o.anello = vec3<f32>(anello, tipo);
     return o;
 }
 
 @fragment
 fn fs_rett(i: UscitaRett) -> @location(0) vec4<f32> {
+    if (i.anello.z > 1.5) {
+        // Anello del mirino a cerchio, con il bordo morbido largo un pixel.
+        let d = length(i.locale);
+        let a = clamp(d - i.anello.x + 0.5, 0.0, 1.0) * clamp(i.anello.y - d + 0.5, 0.0, 1.0);
+        if (a <= 0.0) {
+            discard;
+        }
+        return i.colore * a;
+    }
     return i.colore;
 }

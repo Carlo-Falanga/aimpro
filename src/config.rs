@@ -7,17 +7,22 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::aspetto::{ColoriBersaglio, Tema};
+use crate::mirino::Mirino;
 use crate::scenari::Parametri;
-use crate::sensibilita::Gioco;
+use crate::sensibilita::{Gioco, Variazione};
 
-pub const LIMITI_SENSIBILITA: (f64, f64) = (0.001, 100.0);
 pub const LIMITI_FOV: (f64, f64) = (50.0, 140.0);
 pub const LIMITI_DPI: (f64, f64) = (100.0, 64000.0);
 pub const LIMITI_FPS: (u32, u32) = (30, 2000);
+pub const LIMITI_MOLTIPLICATORE_Y: (f64, f64) = (0.1, 10.0);
+pub const LIMITI_VOLUME: (f64, f64) = (0.0, 100.0);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// Un gioco che non c'è più (Fortnite, tolto il 25/11/2026) o sconosciuto diventa CS2.
+    #[serde(deserialize_with = "gioco_o_predefinito")]
     pub gioco: Gioco,
     pub sensibilita: f64,
     /// FOV orizzontale come nel gioco (CS2 su 4:3, Valorant su 16:9).
@@ -33,6 +38,17 @@ pub struct Config {
     /// All'avvio chiede a GitHub se c'è una build più nuova (acceso di base; un file vecchio senza il campo lo
     /// prende acceso).
     pub controlla_aggiornamenti: bool,
+    /// La sensibilità verticale rispetto a quella orizzontale (1 = uguale).
+    pub moltiplicatore_y: f64,
+    /// La sensibilità a caso, entro ±N%.
+    pub variazione: Variazione,
+    pub mirino: Mirino,
+    pub bersagli: ColoriBersaglio,
+    pub tema: Tema,
+    /// I suoni di colpo, errore e comparsa.
+    pub suoni: bool,
+    /// Da 0 a 100.
+    pub volume: f64,
     /// L'id dello scenario scelto nel menu (un file vecchio senza il campo prende lo scatto).
     pub scenario: String,
     /// Dimensione e velocità dei bersagli, 1 = come dice lo scenario (fra 0,5 e 2).
@@ -53,6 +69,17 @@ impl Default for Config {
     }
 }
 
+/// Il gioco scritto nel file, se aimpro lo conosce.
+fn gioco_noto(nome: &str) -> Option<Gioco> {
+    use serde::de::IntoDeserializer;
+    Gioco::deserialize(IntoDeserializer::<serde::de::value::Error>::into_deserializer(nome)).ok()
+}
+
+fn gioco_o_predefinito<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Gioco, D::Error> {
+    let nome = String::deserialize(d)?;
+    Ok(gioco_noto(&nome).unwrap_or(Gioco::Cs2))
+}
+
 fn dentro(v: f64, (min, max): (f64, f64)) -> bool {
     v.is_finite() && v >= min && v <= max
 }
@@ -68,6 +95,13 @@ impl Config {
             limite_fps: 0,
             schermo_intero_esclusivo: true,
             controlla_aggiornamenti: true,
+            moltiplicatore_y: 1.0,
+            variazione: Variazione::default(),
+            mirino: Mirino::default(),
+            bersagli: ColoriBersaglio::default(),
+            tema: Tema::Grafite,
+            suoni: true,
+            volume: 50.0,
             scenario: crate::storico::SCATTO.to_string(),
             dimensione: 1.0,
             velocita: 1.0,
@@ -97,7 +131,15 @@ impl Config {
     /// Riporta ogni valore fuori dai limiti al predefinito del gioco.
     pub fn normalizzata(mut self) -> Self {
         let p = Config::predefinita(self.gioco);
-        if !dentro(self.sensibilita, LIMITI_SENSIBILITA) {
+        if !dentro(self.moltiplicatore_y, LIMITI_MOLTIPLICATORE_Y) {
+            self.moltiplicatore_y = p.moltiplicatore_y;
+        }
+        if !dentro(self.volume, LIMITI_VOLUME) {
+            self.volume = p.volume;
+        }
+        self.variazione = self.variazione.normalizzata();
+        self.mirino = self.mirino.normalizzato();
+        if !dentro(self.sensibilita, self.gioco.limiti_sensibilita()) {
             self.sensibilita = p.sensibilita;
         }
         if !dentro(self.fov, LIMITI_FOV) {
@@ -142,10 +184,12 @@ fn con_predefiniti_del_gioco(mut c: Config, testo: &str) -> Config {
         return c;
     };
     let p = Config::predefinita(c.gioco);
-    if !tabella.contains_key("sensibilita") {
+    // Con un gioco sconosciuto, sensibilità e FOV del file sono nelle sue unità: non valgono per CS2.
+    let sconosciuto = tabella.get("gioco").and_then(|g| g.as_str()).is_some_and(|g| gioco_noto(g).is_none());
+    if !tabella.contains_key("sensibilita") || sconosciuto {
         c.sensibilita = p.sensibilita;
     }
-    if !tabella.contains_key("fov") {
+    if !tabella.contains_key("fov") || sconosciuto {
         c.fov = p.fov;
     }
     if !tabella.contains_key("primo_avvio_fatto") {
@@ -205,6 +249,25 @@ mod test {
             limite_fps: 240,
             schermo_intero_esclusivo: false,
             controlla_aggiornamenti: false,
+            moltiplicatore_y: 0.8,
+            variazione: Variazione {
+                attiva: true,
+                percento: 12.5,
+                ogni: crate::sensibilita::Ogni::Secondi,
+                secondi: 7.0,
+            },
+            mirino: Mirino {
+                forma: crate::mirino::Forma::Cerchio,
+                lunghezza: 9.0,
+                spessore: 3.0,
+                spazio: 2.0,
+                bordo: 0.0,
+                colore: [10, 200, 30],
+            },
+            bersagli: ColoriBersaglio { normale: [1, 2, 3], guardato: [4, 5, 6], colpito: [7, 8, 9] },
+            tema: Tema::Sabbia,
+            suoni: false,
+            volume: 35.0,
             scenario: "terna".to_string(),
             dimensione: 1.25,
             velocita: 0.75,
@@ -214,6 +277,78 @@ mod test {
         };
         salva(&p, &c).unwrap();
         assert_eq!(carica(&p), (c, None));
+    }
+
+    /// Fortnite c'era in una build di prova ed è stato tolto: un file con quel gioco (o con un gioco che non
+    /// esiste) torna a CS2 con sensibilità e FOV di CS2, senza avvisi, e tiene il resto.
+    #[test]
+    fn un_gioco_tolto_torna_al_predefinito() {
+        let d = cartella_di_prova("gioco-tolto");
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("config.toml");
+        std::fs::write(
+            &p,
+            "gioco = \"fortnite\"\nsensibilita = 6.5\nfov = 80.0\ndpi = 1600.0\ntema = \"notte\"\n",
+        )
+        .unwrap();
+        let (c, avviso) = carica(&p);
+        assert_eq!(avviso, None);
+        assert_eq!(c.gioco, Gioco::Cs2);
+        assert_eq!((c.sensibilita, c.fov), (1.25, 90.0));
+        assert_eq!(c.dpi, 1600.0);
+        assert_eq!(c.tema, Tema::Notte);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Il config.toml come lo scriveva la build di prima (main del 25/11): si legge senza avvisi, tiene i suoi
+    /// valori e prende i predefiniti per le cose nuove.
+    #[test]
+    fn un_config_di_prima_si_legge_ancora() {
+        let d = cartella_di_prova("di-prima");
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("config.toml");
+        std::fs::write(
+            &p,
+            "gioco = \"valorant\"
+sensibilita = 0.32
+fov = 103.0
+dpi = 1600.0
+vsync = false
+limite_fps = 240
+schermo_intero_esclusivo = true
+controlla_aggiornamenti = false
+",
+        )
+        .unwrap();
+        let (c, avviso) = carica(&p);
+        assert_eq!(avviso, None);
+        assert_eq!((c.gioco, c.sensibilita, c.dpi, c.limite_fps), (Gioco::Valorant, 0.32, 1600.0, 240));
+        assert!(!c.controlla_aggiornamenti);
+        let base = Config::default();
+        assert_eq!(c.moltiplicatore_y, 1.0);
+        assert_eq!(c.variazione, base.variazione);
+        assert!(!c.variazione.attiva, "la sensibilità a caso parte spenta");
+        assert_eq!(c.mirino, Mirino::default());
+        assert_eq!(c.bersagli, ColoriBersaglio::default());
+        assert_eq!(c.tema, Tema::Grafite);
+        assert!(c.suoni);
+        assert_eq!(c.volume, 50.0);
+        // E una tabella del mirino scritta a metà prende il resto dai predefiniti.
+        std::fs::write(&p, "[mirino]\nforma = \"punto\"\n").unwrap();
+        let (c, avviso) = carica(&p);
+        assert_eq!(avviso, None);
+        assert_eq!(c.mirino, Mirino { forma: crate::mirino::Forma::Punto, ..Mirino::default() });
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn i_cm360_hanno_i_loro_limiti() {
+        let mut c = Config::predefinita(Gioco::Cm360);
+        assert_eq!(c.sensibilita, 40.0);
+        c.sensibilita = 250.0; // oltre il 100 degli altri giochi, ma dentro per cm/360
+        assert_eq!(c.clone().normalizzata().sensibilita, 250.0);
+        c.sensibilita = 0.5;
+        assert_eq!(c.normalizzata().sensibilita, 40.0);
     }
 
     #[test]
@@ -259,8 +394,13 @@ mod test {
             preferiti: vec!["a".into(), "".into(), "a".into(), "b".into()],
             punteggio_dal_vivo: true,
             primo_avvio_fatto: false,
+            moltiplicatore_y: 50.0,
+            volume: -4.0,
+            ..Config::default()
         }
         .normalizzata();
+        assert_eq!(c.moltiplicatore_y, 1.0);
+        assert_eq!(c.volume, 50.0);
         assert_eq!((c.scenario.as_str(), c.dimensione, c.velocita), ("scatto", 2.0, 0.5));
         assert_eq!(c.preferiti, ["a", "b"], "niente doppi né vuoti");
         assert_eq!(c.sensibilita, 0.4);

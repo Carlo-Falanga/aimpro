@@ -23,10 +23,14 @@ wgpu = { version = "30.0.2", default-features = false, features = ["std", "parki
 windows = { version = "0.62.2", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
+  # I suoni: WASAPI in modalità condivisa (IMMDevice::Activate chiede anche StructuredStorage e Variant).
+  "Win32_Media_Audio",
   "Win32_Networking_WinHttp",
   "Win32_Security",
   "Win32_Security_Cryptography",
   "Win32_System_Com",
+  "Win32_System_Com_StructuredStorage",
+  "Win32_System_Variant",
   "Win32_System_LibraryLoader",
   "Win32_System_Performance",
   "Win32_System_ProcessStatus",

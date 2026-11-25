@@ -19,6 +19,8 @@ use glam::{DVec3, Mat4};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
+use crate::aspetto::{self, ColoriBersaglio, Tema};
+use crate::mirino::{self, Mirino};
 pub use crate::scenari::MAX_SFERE;
 
 /// Punteggio e precisione in percento del giro, per il disegno.
@@ -58,14 +60,23 @@ pub struct SferaGpu {
     pub altro: [f32; 4],
 }
 
-/// Quello che nel giro cambia di rado (l'occhio, la zona, i tratti delle sfere): si riscrive solo quando cambia.
+/// Quello che nel giro cambia di rado (l'occhio, i colori dei bersagli, il tema della stanza, la zona, i tratti delle
+/// sfere): si riscrive solo quando cambia.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, PartialEq)]
 struct Uniformi {
     occhio: [f32; 4],
+    bersaglio_normale: [f32; 4],
+    bersaglio_guardato: [f32; 4],
+    bersaglio_colpito: [f32; 4],
+    pavimento: [f32; 4],
+    soffitto: [f32; 4],
+    pareti: [f32; 4],
+    linee: [f32; 4],
     /// Imbardata minima e massima, beccheggio minimo e massimo dei centri (radianti): i bordi dei rimbalzi.
     zona: [f32; 4],
-    sfere: [SferaGpu; MAX_SFERE],
+    /// Le sfere in campo e, subito dopo l'ultima, quella del lampo.
+    sfere: [SferaGpu; MAX_SFERE + 1],
 }
 
 /// Le sfere di un frame.
@@ -76,14 +87,21 @@ pub struct Sfere {
     pub zona: [f32; 4],
     /// Tempo di gioco in secondi.
     pub tempo_s: f32,
+    /// La sfera sotto il mirino (il suo colore è "guardato").
+    pub guardata: Option<u32>,
+    /// La sfera appena colpita, ferma dove era, e l'opacità del lampo.
+    pub lampo: Option<(SferaGpu, f32)>,
 }
 
+/// Un rettangolo del mirino o del tempo. `tipo`: 0 pieno, 1 barra del tempo, 2 anello (`anello` = raggi interno ed
+/// esterno in pixel, centrato nel rettangolo).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 struct Rett {
     xywh: [f32; 4],
     colore: [f32; 4],
     tipo: f32,
+    anello: [f32; 2],
 }
 
 /// Quello che serve per disegnare un frame di gioco.
@@ -142,6 +160,9 @@ pub struct Grafica {
     /// cambiano si riscrivono.
     rett_scritti: (u32, u32, u32, u32, bool, DalVivo),
     scala: f32,
+    mirino: Mirino,
+    colori: ColoriBersaglio,
+    tema: Tema,
 }
 
 /// Una faccia della stanza: i quattro angoli e la normale verso l'interno.
@@ -325,7 +346,7 @@ impl Grafica {
             &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Rett>() as u64,
                 step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32, 3 => Float32x2],
             })],
             premoltiplicato,
         );
@@ -371,7 +392,20 @@ impl Grafica {
             n_rett: 0,
             rett_scritti: (u32::MAX, 0, 0, 0, false, None),
             scala: finestra_scala(),
+            mirino: Mirino::default(),
+            colori: ColoriBersaglio::default(),
+            tema: Tema::Grafite,
         })
+    }
+
+    /// Mirino, colori dei bersagli e tema della stanza: vanno in scheda video al prossimo frame, una volta sola.
+    pub fn imposta_aspetto(&mut self, m: Mirino, colori: ColoriBersaglio, tema: Tema) {
+        if m != self.mirino {
+            self.mirino = m;
+            self.rett_scritti = (u32::MAX, 0, 0, 0, false, None);
+        }
+        self.colori = colori;
+        self.tema = tema;
     }
 
     pub fn ridimensiona(&mut self, larghezza: u32, altezza: u32, scala: f32) {
@@ -427,20 +461,43 @@ impl Grafica {
         let mut immediati = Immediati::zeroed();
         if let Some(s) = scena {
             let (secondi, frazione) = s.tempo.unwrap_or((0, 0.0));
+            let guardata = s.sfere.and_then(|x| x.guardata).map_or(-1.0, |i| i as f32);
+            let lampo = s.sfere.and_then(|x| x.lampo.map(|(_, a)| (x.n as f32, a)));
+            // tempo = tempo di gioco, sfera guardata, opacità del lampo, indice dell'istanza del lampo (-1 nessuno).
             immediati = Immediati {
                 vp: s.vp.to_cols_array_2d(),
-                tempo: [s.sfere.map_or(0.0, |x| x.tempo_s), -1.0, 0.0, 0.0],
+                tempo: [
+                    s.sfere.map_or(0.0, |x| x.tempo_s),
+                    guardata,
+                    lampo.map_or(0.0, |l| l.1),
+                    lampo.map_or(-1.0, |l| l.0),
+                ],
                 destra: [s.destra.x as f32, s.destra.y as f32, s.destra.z as f32, 0.0],
                 su: [s.su.x as f32, s.su.y as f32, s.su.z as f32, 0.0],
                 schermo: [self.config.width as f32, self.config.height as f32, frazione, self.scala],
             };
-            // Senza sfere (menu, conto alla rovescia) si tengono quelle di prima: niente scrittura in più.
+            // Senza sfere (menu, conto alla rovescia) si tengono quelle di prima: niente scrittura in più. Lo stesso
+            // per il posto del lampo quando il lampo è finito.
             let precedenti = self
                 .uniformi_scritte
-                .map_or(([0.0; 4], [SferaGpu::default(); MAX_SFERE]), |u| (u.zona, u.sfere));
-            let (zona, sfere) = s.sfere.map_or(precedenti, |x| (x.zona, x.dati));
+                .map_or(([0.0; 4], [SferaGpu::default(); MAX_SFERE + 1]), |u| (u.zona, u.sfere));
+            let (zona, sfere) = s.sfere.map_or(precedenti, |x| {
+                let mut a = precedenti.1;
+                a[..MAX_SFERE].copy_from_slice(&x.dati);
+                let n = (x.n as usize).min(MAX_SFERE);
+                a[n] = x.lampo.map_or(precedenti.1[n], |l| l.0);
+                (x.zona, a)
+            });
+            let stanza = self.tema.colori();
             let u = Uniformi {
                 occhio: [s.occhio.x as f32, s.occhio.y as f32, s.occhio.z as f32, 0.0],
+                bersaglio_normale: aspetto::vec4(self.colori.normale),
+                bersaglio_guardato: aspetto::vec4(self.colori.guardato),
+                bersaglio_colpito: aspetto::vec4(self.colori.colpito),
+                pavimento: aspetto::vec4_f(stanza.pavimento),
+                soffitto: aspetto::vec4_f(stanza.soffitto),
+                pareti: aspetto::vec4_f(stanza.pareti),
+                linee: aspetto::vec4_f(stanza.linee),
                 zona,
                 sfere,
             };
@@ -466,6 +523,7 @@ impl Grafica {
                 self.egui.update_buffers(&self.device, &self.queue, &mut encoder, st.primitive, st.schermo);
         }
 
+        let fondo = self.tema.colori().fondo;
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
@@ -473,7 +531,12 @@ impl Grafica {
                     view: &vista,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.07, g: 0.07, b: 0.08, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: f64::from(fondo[0]),
+                            g: f64::from(fondo[1]),
+                            b: f64::from(fondo[2]),
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -489,9 +552,14 @@ impl Grafica {
                 pass.set_immediates(0, bytemuck::bytes_of(&immediati));
                 pass.set_vertex_buffer(0, self.b_stanza.slice(..));
                 pass.draw(0..self.vertici_stanza, 0..1);
-                if let Some(x) = s.sfere.filter(|x| x.n > 0) {
-                    pass.set_pipeline(&self.p_sfera);
-                    pass.draw(0..6, 0..x.n.min(MAX_SFERE as u32));
+                if let Some(x) = s.sfere {
+                    // Le sfere in campo e, se c'è, il lampo della sfera colpita: l'ultima istanza, quindi sopra le
+                    // altre, con la sua opacità.
+                    let n = x.n.min(MAX_SFERE as u32) + u32::from(x.lampo.is_some());
+                    if n > 0 {
+                        pass.set_pipeline(&self.p_sfera);
+                        pass.draw(0..6, 0..n);
+                    }
                 }
                 if self.n_rett > 0 {
                     pass.set_pipeline(&self.p_rett);
@@ -516,7 +584,7 @@ impl Grafica {
 
     fn aggiungi(&mut self, x: f32, y: f32, w: f32, h: f32, colore: [f32; 4], tipo: f32) {
         if self.n_rett < MAX_RETT {
-            self.rett[self.n_rett] = Rett { xywh: [x, y, w, h], colore, tipo };
+            self.rett[self.n_rett] = Rett { xywh: [x, y, w, h], colore, tipo, anello: [0.0; 2] };
             self.n_rett += 1;
         }
     }
@@ -525,35 +593,19 @@ impl Grafica {
         self.n_rett = 0;
         let s = self.scala;
         let (w, h) = (self.config.width as f32, self.config.height as f32);
-        // Mirino: una croce con contorno scuro, si vede su ogni sfondo.
         let cx = (w / 2.0).round();
         let cy = (h / 2.0).round();
-        let spessore = (2.0 * s).round().max(2.0);
-        let lunghezza = (6.0 * s).round();
-        let vuoto = (4.0 * s).round();
-        let bordo = s.round().max(1.0);
-        let meta = (spessore / 2.0).floor();
-        for passo in 0..2 {
-            let o = if passo == 0 { bordo } else { 0.0 };
-            let c = if passo == 0 { [0.0, 0.0, 0.0, 0.75] } else { [1.0, 1.0, 1.0, 1.0] };
-            self.aggiungi(cx + vuoto - o, cy - meta - o, lunghezza + 2.0 * o, spessore + 2.0 * o, c, 0.0);
-            self.aggiungi(
-                cx - vuoto - lunghezza - o,
-                cy - meta - o,
-                lunghezza + 2.0 * o,
-                spessore + 2.0 * o,
-                c,
-                0.0,
-            );
-            self.aggiungi(cx - meta - o, cy + vuoto - o, spessore + 2.0 * o, lunghezza + 2.0 * o, c, 0.0);
-            self.aggiungi(
-                cx - meta - o,
-                cy - vuoto - lunghezza - o,
-                spessore + 2.0 * o,
-                lunghezza + 2.0 * o,
-                c,
-                0.0,
-            );
+        // Il mirino: la stessa geometria dell'anteprima del menu (`mirino::pezzi`).
+        let mut pezzi = [mirino::Pezzo::default(); mirino::MAX_PEZZI];
+        let n = mirino::pezzi(&self.mirino, cx, cy, s, &mut pezzi);
+        for p in &pezzi[..n] {
+            match p.anello {
+                Some((interno, esterno)) => {
+                    self.aggiungi(p.x, p.y, p.w, p.h, p.colore, 2.0);
+                    self.rett[self.n_rett - 1].anello = [interno, esterno];
+                }
+                None => self.aggiungi(p.x, p.y, p.w, p.h, p.colore, 0.0),
+            }
         }
         if let Some(sec) = secondi {
             // Il tempo in alto, a sette segmenti, e la barra che si accorcia.
@@ -690,7 +742,7 @@ mod test {
     #[test]
     fn i_dati_dello_shader_hanno_le_misure_giuste() {
         assert_eq!(std::mem::size_of::<Immediati>(), 128);
-        // occhio, zona e 8 sfere da 32 byte: come `Uniformi` in scena.wgsl.
-        assert_eq!(std::mem::size_of::<Uniformi>(), 16 + 16 + 32 * MAX_SFERE);
+        // occhio, 7 colori, zona e 9 sfere da 32 byte (8 più il lampo): come `Uniformi` in scena.wgsl.
+        assert_eq!(std::mem::size_of::<Uniformi>(), 16 * 8 + 16 + 32 * (MAX_SFERE + 1));
     }
 }

@@ -10,6 +10,7 @@
 mod aggiornamento;
 mod allocazioni;
 mod app;
+mod aspetto;
 mod banco;
 mod camera;
 mod config;
@@ -17,9 +18,11 @@ mod esporta;
 mod giro;
 mod grafica;
 mod home;
+mod impostazioni;
 mod ingresso;
 mod interfaccia;
 mod latenza;
+mod mirino;
 mod misure;
 mod registro;
 mod rete;
@@ -27,6 +30,7 @@ mod scenari;
 mod sensibilita;
 mod sistema;
 mod storico;
+mod suoni;
 mod tempo;
 
 use std::path::PathBuf;
