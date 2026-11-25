@@ -116,6 +116,9 @@ fn riga_limite(ui: &mut Ui, c: &mut Config, hz_schermo: u32) -> bool {
         ui.horizontal_top(|ui| {
             tendina(ui, &mut scelta);
             if scelta == voce {
+                // Margini interni più stretti: con l'etichetta del FOV di Valorant la colonna parte più a destra e
+                // "2000 fps" con i margini dei pulsanti allargava il riquadro del menu.
+                ui.spacing_mut().button_padding.x = 8.0;
                 ui.add(
                     egui::DragValue::new(&mut c.limite_fps)
                         .range(LIMITI_FPS.0..=LIMITI_FPS.1)
@@ -354,7 +357,14 @@ pub fn menu(ui: &mut Ui, c: &mut Config, info: &InfoMenu) -> Azione {
                 // Col vsync il limite non vale: la riga resta, grigia, e dice perché.
                 // Disegnate come disattivate, cioè più scure delle altre righe.
                 ui.add_enabled(false, egui::Label::new("Limite fps"));
-                ui.add_enabled(false, egui::Label::new("col vsync decide lo schermo"));
+                // Alta quanto la tendina: accendendo il vsync il riquadro non si sposta.
+                let alta =
+                    ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(0.0, alta),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| ui.add_enabled(false, egui::Label::new("col vsync decide lo schermo")),
+                );
             } else {
                 ui.label("Limite fps");
                 if riga_limite(ui, c, info.hz_schermo) {
