@@ -405,7 +405,11 @@ impl Grafica {
             self.rett_scritti = (u32::MAX, 0, 0, 0, false, None);
         }
         self.colori = colori;
-        self.tema = tema;
+        if tema != self.tema {
+            // Tempo e punteggio prendono il colore del testo del tema.
+            self.tema = tema;
+            self.rett_scritti = (u32::MAX, 0, 0, 0, false, None);
+        }
     }
 
     pub fn ridimensiona(&mut self, larghezza: u32, altezza: u32, scala: f32) {
@@ -617,7 +621,7 @@ impl Grafica {
             if sec >= 100 {
                 // Gli scenari dei file possono durare fino a 300 secondi: tre cifre, centrate.
                 let largo = 3.0 * cw + 2.0 * (6.0 * s).round();
-                self.numero(sec, (cx - largo / 2.0).round(), y, cw, ch, t, [0.92, 0.92, 0.92, 0.9]);
+                self.numero(sec, (cx - largo / 2.0).round(), y, cw, ch, t, self.tema.colori().testo);
             } else {
                 self.cifra(sec / 10, (cx - cw - spazio / 2.0).round(), y, cw, ch, t);
                 self.cifra(sec % 10, (cx + spazio / 2.0).round(), y, cw, ch, t);
@@ -626,8 +630,10 @@ impl Grafica {
             let hb = (3.0 * s).round().max(2.0);
             let yb = y + ch + (10.0 * s).round();
             let xb = (cx - lb / 2.0).round();
-            self.aggiungi(xb, yb, lb, hb, [1.0, 1.0, 1.0, 0.18], 0.0);
-            self.aggiungi(xb, yb, lb, hb, [1.0, 0.69, 0.13, 0.95], 1.0);
+            let mut fondo_barra = self.tema.colori().testo;
+            fondo_barra[3] = 0.18;
+            self.aggiungi(xb, yb, lb, hb, fondo_barra, 0.0);
+            self.aggiungi(xb, yb, lb, hb, self.tema.colori().accento, 1.0);
         }
         if let Some(n) = conto {
             // Il conto alla rovescia: una cifra grande sopra il mirino.
@@ -641,13 +647,13 @@ impl Grafica {
             let x = (28.0 * s).round();
             let y = (22.0 * s).round();
             let (ch, cw, t) = ((30.0 * s).round(), (17.0 * s).round(), (4.0 * s).round().max(2.0));
-            self.numero(punti, x, y, cw, ch, t, [0.92, 0.92, 0.92, 0.9]);
+            self.numero(punti, x, y, cw, ch, t, self.tema.colori().testo);
             if let Some(p) = precisione {
                 let (ph, pw, pt) = ((18.0 * s).round(), (10.0 * s).round(), (3.0 * s).round().max(2.0));
                 let yp = y + ch + (10.0 * s).round();
-                let fine = self.numero(p, x, yp, pw, ph, pt, [1.0, 0.69, 0.13, 0.95]);
+                let fine = self.numero(p, x, yp, pw, ph, pt, self.tema.colori().accento);
                 // Il segno di percento: due quadratini e, fra loro, una diagonale a gradini.
-                let arancio = [1.0, 0.69, 0.13, 0.95];
+                let arancio = self.tema.colori().accento;
                 let q = pt + 1.0;
                 let xs = fine + (5.0 * s).round();
                 let lw = pw + 2.0 * q;
@@ -684,7 +690,7 @@ impl Grafica {
     }
 
     fn cifra(&mut self, n: u32, x: f32, y: f32, w: f32, h: f32, t: f32) {
-        self.cifra_colore(n, x, y, w, h, t, [0.92, 0.92, 0.92, 0.9]);
+        self.cifra_colore(n, x, y, w, h, t, self.tema.colori().testo);
     }
 
     #[allow(clippy::too_many_arguments)]
