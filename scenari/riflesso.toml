@@ -1,0 +1,25 @@
+# Reazione: il tempo medio del riepilogo è il tempo dalla comparsa al colpo.
+formato = 1
+id = "riflesso"
+nome = "Riflesso"
+categoria = "precisione"
+difficolta = "media"
+descrizione = "Dopo ogni colpo la sfera nuova compare dopo un'attesa a caso: colpiscila appena la vedi."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 1
+raggio = 0.4
+distanza = 12.0
+distanza_minima_gradi = 8.0
+ritardo_min_ms = 400
+ritardo_max_ms = 1500
+
+[zona]
+imbardata_gradi = 25.0
+beccheggio_min_gradi = -6.0
+beccheggio_max_gradi = 14.0
+
+[movimento]
+tipo = "fermo"

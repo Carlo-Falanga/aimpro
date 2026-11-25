@@ -2,6 +2,8 @@
 formato = 1
 id = "sciame"
 nome = "Sciame"
+categoria = "cambio"
+difficolta = "difficile"
 descrizione = "Tre sfere che si muovono e cambiano direzione: passa dall'una all'altra; ogni sfera colpita rinasce altrove."
 durata_s = 30.0
 punteggio = "colpi"

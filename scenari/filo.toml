@@ -2,6 +2,8 @@
 formato = 1
 id = "filo"
 nome = "Filo"
+categoria = "tracking"
+difficolta = "media"
 descrizione = "Segui una sfera piccola che si muove regolare, col tasto sinistro premuto."
 durata_s = 30.0
 punteggio = "tracking"

@@ -17,14 +17,34 @@ pub const MAX_SFERE: usize = 8;
 /// I limiti dei parametri regolabili nel menu (dimensione e velocità dei bersagli, 1 = come dice lo scenario).
 pub const LIMITI_PARAMETRO: (f64, f64) = (0.5, 2.0);
 
-/// Gli scenari di aimpro, nell'ordine del menu.
-const DI_AIMPRO: [(&str, &str); 6] = [
+/// Gli scenari di aimpro, nell'ordine della libreria (per categoria).
+const DI_AIMPRO: [(&str, &str); 26] = [
     ("scatto.toml", include_str!("../scenari/scatto.toml")),
+    ("pianura.toml", include_str!("../scenari/pianura.toml")),
+    ("ventaglio.toml", include_str!("../scenari/ventaglio.toml")),
+    ("altura.toml", include_str!("../scenari/altura.toml")),
+    ("orizzonte.toml", include_str!("../scenari/orizzonte.toml")),
     ("deriva.toml", include_str!("../scenari/deriva.toml")),
+    ("corrente.toml", include_str!("../scenari/corrente.toml")),
+    ("rapide.toml", include_str!("../scenari/rapide.toml")),
+    ("scarto.toml", include_str!("../scenari/scarto.toml")),
+    ("vortice.toml", include_str!("../scenari/vortice.toml")),
+    ("nastro.toml", include_str!("../scenari/nastro.toml")),
     ("filo.toml", include_str!("../scenari/filo.toml")),
+    ("binario.toml", include_str!("../scenari/binario.toml")),
     ("guizzo.toml", include_str!("../scenari/guizzo.toml")),
+    ("lucciola.toml", include_str!("../scenari/lucciola.toml")),
+    ("raffica.toml", include_str!("../scenari/raffica.toml")),
+    ("coppia.toml", include_str!("../scenari/coppia.toml")),
     ("terna.toml", include_str!("../scenari/terna.toml")),
+    ("costellazione.toml", include_str!("../scenari/costellazione.toml")),
     ("sciame.toml", include_str!("../scenari/sciame.toml")),
+    ("stormo.toml", include_str!("../scenari/stormo.toml")),
+    ("chicco.toml", include_str!("../scenari/chicco.toml")),
+    ("spillo.toml", include_str!("../scenari/spillo.toml")),
+    ("cruna.toml", include_str!("../scenari/cruna.toml")),
+    ("riflesso.toml", include_str!("../scenari/riflesso.toml")),
+    ("sentinella.toml", include_str!("../scenari/sentinella.toml")),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,6 +83,9 @@ pub struct Regole {
     pub velocita: f64,
     pub cambio_min_ms: f64,
     pub cambio_max_ms: f64,
+    /// Dopo un colpo la sfera nuova compare dopo un'attesa a caso fra questi due (0 = subito): la reazione.
+    pub ritardo_min_ms: f64,
+    pub ritardo_max_ms: f64,
 }
 
 impl Regole {
@@ -113,11 +136,83 @@ impl Default for Parametri {
     }
 }
 
+/// Le categorie della libreria, nell'ordine in cui si mostrano.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Categoria {
+    Fermi,
+    Movimento,
+    Tracking,
+    Cambio,
+    Precisione,
+}
+
+impl Categoria {
+    pub const TUTTE: [Categoria; 5] = [
+        Categoria::Fermi,
+        Categoria::Movimento,
+        Categoria::Tracking,
+        Categoria::Cambio,
+        Categoria::Precisione,
+    ];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Categoria::Fermi => "Clic su bersagli fermi",
+            Categoria::Movimento => "Clic su bersagli in movimento",
+            Categoria::Tracking => "Tracking",
+            Categoria::Cambio => "Cambio di bersaglio",
+            Categoria::Precisione => "Precisione e reazione",
+        }
+    }
+
+    /// La categoria di un file che non la dice, dalle sue regole.
+    fn da_regole(r: &Regole) -> Self {
+        if r.tracking() {
+            Categoria::Tracking
+        } else if r.sfere > 1 {
+            Categoria::Cambio
+        } else if r.ritardo_max_ms > 0.0 {
+            Categoria::Precisione
+        } else if r.movimento != TipoMovimento::Fermo {
+            Categoria::Movimento
+        } else {
+            Categoria::Fermi
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Difficolta {
+    Facile,
+    #[default]
+    Media,
+    Difficile,
+    Estrema,
+}
+
+impl Difficolta {
+    pub const TUTTE: [Difficolta; 4] =
+        [Difficolta::Facile, Difficolta::Media, Difficolta::Difficile, Difficolta::Estrema];
+
+    pub fn nome(self) -> &'static str {
+        match self {
+            Difficolta::Facile => "facile",
+            Difficolta::Media => "media",
+            Difficolta::Difficile => "difficile",
+            Difficolta::Estrema => "estrema",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Scenario {
     pub id: String,
     pub nome: String,
     pub descrizione: String,
+    pub categoria: Categoria,
+    pub difficolta: Difficolta,
     pub regole: Regole,
     /// Il file da cui viene (`None` per quelli di aimpro).
     pub file: Option<PathBuf>,
@@ -133,6 +228,10 @@ struct File {
     nome: String,
     #[serde(default)]
     descrizione: String,
+    #[serde(default)]
+    categoria: Option<Categoria>,
+    #[serde(default)]
+    difficolta: Difficolta,
     #[serde(default = "trenta")]
     durata_s: f64,
     punteggio: Punteggio,
@@ -156,6 +255,10 @@ struct FileBersagli {
     distanza: f64,
     #[serde(default)]
     distanza_minima_gradi: f64,
+    #[serde(default)]
+    ritardo_min_ms: f64,
+    #[serde(default)]
+    ritardo_max_ms: f64,
 }
 
 fn uno() -> u32 {
@@ -239,6 +342,8 @@ pub fn leggi(testo: &str) -> Result<Scenario, String> {
     fra("bersagli.raggio", f.bersagli.raggio, 0.05, 2.0)?;
     fra("bersagli.distanza", f.bersagli.distanza, 3.0, 16.0)?;
     fra("bersagli.distanza_minima_gradi", f.bersagli.distanza_minima_gradi, 0.0, 40.0)?;
+    fra("bersagli.ritardo_min_ms", f.bersagli.ritardo_min_ms, 0.0, 10_000.0)?;
+    fra("bersagli.ritardo_max_ms", f.bersagli.ritardo_max_ms, f.bersagli.ritardo_min_ms, 10_000.0)?;
     fra("zona.imbardata_gradi", f.zona.imbardata_gradi, 0.0, 80.0)?;
     fra("zona.beccheggio_min_gradi", f.zona.beccheggio_min_gradi, -45.0, 45.0)?;
     fra("zona.beccheggio_max_gradi", f.zona.beccheggio_max_gradi, f.zona.beccheggio_min_gradi, 45.0)?;
@@ -253,25 +358,30 @@ pub fn leggi(testo: &str) -> Result<Scenario, String> {
         }
     }
     let r = f64::to_radians;
+    let regole = Regole {
+        durata_ms: f.durata_s * 1000.0,
+        punteggio: f.punteggio,
+        sfere: f.bersagli.numero as usize,
+        raggio: f.bersagli.raggio,
+        distanza: f.bersagli.distanza,
+        distanza_minima: r(f.bersagli.distanza_minima_gradi),
+        imbardata_max: r(f.zona.imbardata_gradi),
+        beccheggio_min: r(f.zona.beccheggio_min_gradi),
+        beccheggio_max: r(f.zona.beccheggio_max_gradi),
+        movimento: m.tipo,
+        velocita: if m.tipo == TipoMovimento::Fermo { 0.0 } else { r(m.velocita_gradi_s) },
+        cambio_min_ms: m.cambio_min_ms,
+        cambio_max_ms: m.cambio_max_ms,
+        ritardo_min_ms: f.bersagli.ritardo_min_ms,
+        ritardo_max_ms: f.bersagli.ritardo_max_ms,
+    };
     Ok(Scenario {
         id: id.to_string(),
         nome: nome.to_string(),
         descrizione: f.descrizione.trim().to_string(),
-        regole: Regole {
-            durata_ms: f.durata_s * 1000.0,
-            punteggio: f.punteggio,
-            sfere: f.bersagli.numero as usize,
-            raggio: f.bersagli.raggio,
-            distanza: f.bersagli.distanza,
-            distanza_minima: r(f.bersagli.distanza_minima_gradi),
-            imbardata_max: r(f.zona.imbardata_gradi),
-            beccheggio_min: r(f.zona.beccheggio_min_gradi),
-            beccheggio_max: r(f.zona.beccheggio_max_gradi),
-            movimento: m.tipo,
-            velocita: if m.tipo == TipoMovimento::Fermo { 0.0 } else { r(m.velocita_gradi_s) },
-            cambio_min_ms: m.cambio_min_ms,
-            cambio_max_ms: m.cambio_max_ms,
-        },
+        categoria: f.categoria.unwrap_or_else(|| Categoria::da_regole(&regole)),
+        difficolta: f.difficolta,
+        regole,
         file: None,
     })
 }
@@ -347,10 +457,32 @@ beccheggio_max_gradi = 10
 "#;
 
     #[test]
-    fn gli_scenari_di_aimpro_sono_sei_e_durano_30_secondi() {
+    fn la_libreria_ha_26_scenari_in_5_categorie_e_durano_30_secondi() {
         let s = di_aimpro();
-        let id: Vec<&str> = s.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(id, ["scatto", "deriva", "filo", "guizzo", "terna", "sciame"]);
+        assert_eq!(s.len(), 26);
+        for id in ["scatto", "deriva", "filo", "guizzo", "terna", "sciame"] {
+            assert!(s.iter().any(|x| x.id == id), "manca {id}");
+        }
+        for c in Categoria::TUTTE {
+            let n = s.iter().filter(|x| x.categoria == c).count();
+            assert!(n >= 4, "{c:?}: solo {n}");
+        }
+        // In ordine di categoria, id e nomi tutti diversi.
+        let cat: Vec<usize> =
+            s.iter().map(|x| Categoria::TUTTE.iter().position(|c| *c == x.categoria).unwrap()).collect();
+        assert!(cat.windows(2).all(|w| w[0] <= w[1]), "{cat:?}");
+        let mut id: Vec<&str> = s.iter().map(|x| x.id.as_str()).collect();
+        let mut nomi: Vec<&str> = s.iter().map(|x| x.nome.as_str()).collect();
+        id.sort();
+        id.dedup();
+        nomi.sort();
+        nomi.dedup();
+        assert_eq!((id.len(), nomi.len()), (26, 26));
+        // Ogni difficoltà c'è, e il tracking sta tutto nella sua categoria.
+        for d in Difficolta::TUTTE {
+            assert!(s.iter().any(|x| x.difficolta == d), "nessuno {d:?}");
+        }
+        assert!(s.iter().all(|x| x.regole.tracking() == (x.categoria == Categoria::Tracking)));
         assert!(s.iter().all(|s| s.regole.durata_ms == 30_000.0));
         assert!(s.iter().all(|s| !s.descrizione.is_empty() && s.file.is_none()));
     }
@@ -384,7 +516,7 @@ beccheggio_max_gradi = 10
 
     #[test]
     fn scatto_resta_quello_di_prima() {
-        let s = di_aimpro().remove(0);
+        let s = di_aimpro().into_iter().find(|s| s.id == "scatto").unwrap();
         let r = s.regole;
         let g = f64::to_radians;
         assert_eq!(s.id, "scatto");
@@ -410,9 +542,11 @@ beccheggio_max_gradi = 10
         std::fs::write(d.join("nota.txt"), "non è uno scenario").unwrap();
         let (s, avvisi) = carica(&d);
         assert!(avvisi.is_empty(), "{avvisi:?}");
-        assert_eq!(s.len(), 7);
-        assert_eq!(s[6].id, "mio");
-        assert_eq!(s[6].file.as_deref(), Some(d.join("mio.toml").as_path()));
+        assert_eq!(s.len(), 27);
+        assert_eq!(s[26].id, "mio");
+        assert_eq!(s[26].file.as_deref(), Some(d.join("mio.toml").as_path()));
+        assert_eq!(s[26].categoria, Categoria::Cambio, "senza categoria: dalle regole (due sfere)");
+        assert_eq!(s[26].difficolta, Difficolta::Media);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -426,8 +560,8 @@ beccheggio_max_gradi = 10
         std::fs::write(d.join("e-sconosciuto.toml"), format!("colore = \"rosso\"\n{MIO}")).unwrap();
         std::fs::write(d.join("f-buono.toml"), MIO).unwrap();
         let (s, avvisi) = carica(&d);
-        assert_eq!(s.len(), 7, "i sei di aimpro e quello buono");
-        assert_eq!(s[6].id, "mio");
+        assert_eq!(s.len(), 27, "quelli di aimpro e quello buono");
+        assert_eq!(s[26].id, "mio");
         assert_eq!(avvisi.len(), 5, "{avvisi:#?}");
         assert!(avvisi[0].starts_with("scenario a-rotto.toml saltato: riga 1"), "{}", avvisi[0]);
         assert!(avvisi[1].contains("bersagli.raggio = 50"), "{}", avvisi[1]);
@@ -440,7 +574,7 @@ beccheggio_max_gradi = 10
     #[test]
     fn senza_cartella_solo_quelli_di_aimpro() {
         let (s, avvisi) = carica(&std::env::temp_dir().join("aimpro-test-scenari-non-esiste"));
-        assert_eq!((s.len(), avvisi.len()), (6, 0));
+        assert_eq!((s.len(), avvisi.len()), (26, 0));
     }
 
     #[test]
@@ -459,7 +593,7 @@ beccheggio_max_gradi = 10
         let p = Parametri { dimensione: 9.0, velocita: f64::NAN }.normalizzati();
         assert_eq!((p.dimensione, p.velocita), (2.0, 1.0));
         assert_eq!(Parametri { dimensione: 0.849_999, velocita: 0.1 }.normalizzati().dimensione, 0.85);
-        let r = di_aimpro()[1].regole;
+        let r = di_aimpro().into_iter().find(|s| s.id == "deriva").unwrap().regole;
         let c = r.con(Parametri { dimensione: 1.5, velocita: 2.0 });
         assert!((c.raggio - r.raggio * 1.5).abs() < 1e-12 && (c.velocita - r.velocita * 2.0).abs() < 1e-12);
     }

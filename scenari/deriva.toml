@@ -2,6 +2,8 @@
 formato = 1
 id = "deriva"
 nome = "Deriva"
+categoria = "movimento"
+difficolta = "facile"
 descrizione = "Una sfera alla volta che scivola piano: colpiscila, ne compare un'altra altrove."
 durata_s = 30.0
 punteggio = "colpi"

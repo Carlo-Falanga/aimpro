@@ -2,6 +2,8 @@
 formato = 1
 id = "guizzo"
 nome = "Guizzo"
+categoria = "tracking"
+difficolta = "difficile"
 descrizione = "Segui una sfera che cambia direzione all'improvviso, col tasto sinistro premuto."
 durata_s = 30.0
 punteggio = "tracking"

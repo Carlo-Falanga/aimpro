@@ -1,7 +1,9 @@
-# Lo scenario di partenza di aimpro: una sfera ferma alla volta, appena la colpisci ne compare un'altra.
+# Lo scenario di partenza di aimpro.
 formato = 1
 id = "scatto"
 nome = "Scatto"
+categoria = "fermi"
+difficolta = "media"
 descrizione = "Una sfera ferma alla volta: appena la colpisci ne compare un'altra in un altro punto."
 durata_s = 30.0
 punteggio = "colpi"

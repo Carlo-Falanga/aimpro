@@ -489,7 +489,12 @@ impl App {
             let m = g.tratto(i);
             *d = SferaGpu {
                 moto: [m.imbardata as f32, m.beccheggio as f32, m.v_imbardata as f32, m.v_beccheggio as f32],
-                altro: [(m.t0 / 1000.0) as f32, r.raggio as f32, r.distanza as f32, 0.0],
+                altro: [
+                    (m.t0 / 1000.0) as f32,
+                    r.raggio as f32,
+                    r.distanza as f32,
+                    (g.comparsa(i) / 1000.0) as f32,
+                ],
             };
         }
         Sfere {

@@ -1,0 +1,26 @@
+# Flick difficile: piccolo, veloce e imprevedibile.
+formato = 1
+id = "vortice"
+nome = "Vortice"
+categoria = "movimento"
+difficolta = "estrema"
+descrizione = "Sfere più piccole, veloci e con cambi di direzione improvvisi."
+durata_s = 30.0
+punteggio = "colpi"
+
+[bersagli]
+numero = 1
+raggio = 0.32
+distanza = 12.0
+distanza_minima_gradi = 10.0
+
+[zona]
+imbardata_gradi = 40.0
+beccheggio_min_gradi = -10.0
+beccheggio_max_gradi = 20.0
+
+[movimento]
+tipo = "casuale"
+velocita_gradi_s = 28.0
+cambio_min_ms = 250
+cambio_max_ms = 700

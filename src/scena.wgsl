@@ -17,7 +17,7 @@ struct Immediati {
 var<immediate> f: Immediati;
 
 // Una sfera: il suo tratto di moto. moto = imbardata e beccheggio di partenza, velocità (radianti al secondo);
-// altro = istante di partenza (secondi di gioco), raggio, distanza dall'occhio.
+// altro = istante di partenza (secondi di gioco), raggio, distanza dall'occhio, istante in cui compare.
 struct Sfera {
     moto: vec4<f32>,
     altro: vec4<f32>,
@@ -123,6 +123,10 @@ fn vs_sfera(@builtin(vertex_index) v: u32, @builtin(instance_index) i: u32) -> U
     let p = c + (f.destra.xyz * a.x + f.su.xyz * a.y) * r * 1.6;
     var o: UscitaSfera;
     o.pos = f.vp * vec4<f32>(p, 1.0);
+    if (f.tempo.x < s.altro.w) {
+        // Non ancora comparsa (scenari di reazione): il quadrato va fuori dal volume visibile e non si disegna.
+        o.pos = vec4<f32>(0.0, 0.0, -1.0, 1.0);
+    }
     o.mondo = p;
     o.sfera = vec4<f32>(c, r);
     o.indice = i;

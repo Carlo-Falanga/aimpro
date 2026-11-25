@@ -1015,7 +1015,7 @@ mod test {
     fn la_spiegazione_dice_durata_e_conto() {
         let s = crate::scenari::di_aimpro();
         assert!(spiegazione(&s[0]).contains("30 secondi, conta i colpi"));
-        assert!(spiegazione(&s[2]).contains("tasto sinistro premuto"));
+        assert!(spiegazione(s.iter().find(|x| x.id == "filo").unwrap()).contains("tasto sinistro premuto"));
     }
 
     #[test]

@@ -2,6 +2,8 @@
 formato = 1
 id = "terna"
 nome = "Terna"
+categoria = "cambio"
+difficolta = "media"
 descrizione = "Tre sfere ferme in campo: passa dall'una all'altra; ogni sfera colpita rinasce altrove."
 durata_s = 30.0
 punteggio = "colpi"

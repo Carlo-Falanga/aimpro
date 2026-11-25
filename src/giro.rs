@@ -87,6 +87,8 @@ struct Sfera {
     tratto: Tratto,
     /// Quando cambia direzione (ms di gioco), negli scenari a moto casuale.
     cambio: f64,
+    /// Quando compare (ms di gioco): dopo un colpo, negli scenari di reazione, passa un'attesa a caso.
+    comparsa: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -100,8 +102,9 @@ pub struct Giro {
     occhio: DVec3,
     caso: Caso,
     sfere: [Sfera; MAX_SFERE],
-    /// I centri all'ultimo `avanza`.
+    /// I centri all'ultimo `avanza`, e il suo tempo di gioco.
     centri: [DVec3; MAX_SFERE],
+    tg: f64,
     /// Cresce a ogni tratto nuovo: chi disegna riscrive il buffer delle sfere solo quando cambia.
     pub versione: u64,
     /// Istante (ms) in cui parte il tempo di gioco; durante il conto alla rovescia è nel futuro. Si sposta in avanti
@@ -133,6 +136,7 @@ impl Giro {
             caso,
             sfere: [Sfera::default(); MAX_SFERE],
             centri: [occhio + DVec3::NEG_Z * regole.distanza; MAX_SFERE],
+            tg: 0.0,
             versione: 0,
             inizio: 0.0,
             inizio_pausa: 0.0,
@@ -165,6 +169,16 @@ impl Giro {
 
     pub fn tratto(&self, i: usize) -> Tratto {
         self.sfere[i].tratto
+    }
+
+    /// Quando compare la sfera `i` (ms di gioco).
+    pub fn comparsa(&self, i: usize) -> f64 {
+        self.sfere[i].comparsa
+    }
+
+    /// La sfera `i` si vede, all'ultimo `avanza`?
+    pub fn visibile(&self, i: usize) -> bool {
+        self.tg >= self.sfere[i].comparsa
     }
 
     /// Il giro parte con il conto alla rovescia: il tempo di gioco comincia fra `CONTO_MS`.
@@ -269,6 +283,7 @@ impl Giro {
         for i in 0..self.regole.sfere {
             self.centri[i] = self.centro_a(i, tg);
         }
+        self.tg = tg;
     }
 
     /// Gli angoli della sfera `i` al tempo di gioco `tg`.
@@ -294,7 +309,7 @@ impl Giro {
         let mut migliore = f64::NEG_INFINITY;
         for i in 0..self.regole.sfere {
             let c = self.centri[i];
-            if colpisce_sfera(self.occhio, d, c, self.regole.raggio) {
+            if self.visibile(i) && colpisce_sfera(self.occhio, d, c, self.regole.raggio) {
                 let coseno = (c - self.occhio).normalize_or_zero().dot(d);
                 if coseno > migliore {
                     migliore = coseno;
@@ -341,7 +356,8 @@ impl Giro {
         match self.guarda(d) {
             Some(i) => {
                 self.colpi += 1;
-                self.somma_tempi += tg - self.ultimo_colpo;
+                // Dal colpo prima o, se è comparsa dopo, dalla comparsa: con l'attesa è il tempo di reazione.
+                self.somma_tempi += tg - self.ultimo_colpo.max(self.sfere[i].comparsa);
                 self.ultimo_colpo = tg;
                 self.colpita = self.centri[i];
                 self.nuova_sfera(i, tg, false);
@@ -406,14 +422,21 @@ impl Giro {
                 break;
             }
         }
-        let mut tratto = Tratto { imbardata: scelta.0, beccheggio: scelta.1, t0: tg, ..Tratto::default() };
+        let comparsa = if r.ritardo_max_ms > 0.0 {
+            tg + r.ritardo_min_ms + self.caso.prossimo() * (r.ritardo_max_ms - r.ritardo_min_ms)
+        } else {
+            tg
+        };
+        let mut tratto =
+            Tratto { imbardata: scelta.0, beccheggio: scelta.1, t0: comparsa, ..Tratto::default() };
         if r.movimento != TipoMovimento::Fermo {
             let direzione = self.caso.prossimo() * std::f64::consts::TAU;
             tratto.v_imbardata = r.velocita * direzione.cos();
             tratto.v_beccheggio = r.velocita * direzione.sin();
         }
         self.sfere[i].tratto = tratto;
-        self.sfere[i].cambio = tg + self.intervallo_cambio();
+        self.sfere[i].comparsa = comparsa;
+        self.sfere[i].cambio = comparsa + self.intervallo_cambio();
         self.versione += 1;
     }
 
@@ -834,6 +857,26 @@ pub mod test {
         let base = regole("scatto");
         let g = Giro::new(OCCHIO, Caso::new(23), base.con(Parametri { dimensione: 1.5, velocita: 1.0 }));
         assert!((g.raggio() - 0.6).abs() < 1e-12);
+    }
+
+    #[test]
+    fn nella_reazione_la_sfera_compare_dopo_un_attesa_e_conta_da_li() {
+        let mut g = Giro::new(OCCHIO, Caso::new(28), regole("riflesso"));
+        let r = g.regole;
+        g.inizia(-CONTO_MS);
+        g.avanza(0.0);
+        let attesa = g.comparsa(0);
+        assert!((r.ritardo_min_ms..=r.ritardo_max_ms).contains(&attesa), "{attesa}");
+        assert!(!g.visibile(0));
+        // Prima che compaia, mirarla non è un colpo.
+        assert_eq!(g.clic(attesa - 10.0, mira_a(&g, 0)), Esito::Errore);
+        g.avanza(attesa + 250.0);
+        assert!(g.visibile(0));
+        assert_eq!(g.clic(attesa + 250.0, mira_a(&g, 0)), Esito::Colpo);
+        // Il tempo è dalla comparsa al colpo, non dalla partenza.
+        assert!((g.riepilogo().tempo_medio_ms.unwrap() - 250.0).abs() < 1e-9);
+        let dopo = g.comparsa(0) - (attesa + 250.0);
+        assert!((r.ritardo_min_ms..=r.ritardo_max_ms).contains(&dopo), "{dopo}");
     }
 
     // ------------------------------------------------------------ tracking
